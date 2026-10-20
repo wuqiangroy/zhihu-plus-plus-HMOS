@@ -4,7 +4,7 @@ export interface SchemaMigration {
   statements: Array<string>;
 }
 
-export const CURRENT_SCHEMA_VERSION: number = 10;
+export const CURRENT_SCHEMA_VERSION: number = 11;
 
 export function schemaMigrationTo(targetVersion: number): SchemaMigration {
   if (targetVersion === 1) {
@@ -119,6 +119,13 @@ export function schemaMigrationTo(targetVersion: number): SchemaMigration {
       fromVersion: 9,
       toVersion: 10,
       statements: ['ALTER TABLE remote_history_sync ADD COLUMN last_attempt INTEGER']
+    };
+  }
+  if (targetVersion === 11) {
+    return {
+      fromVersion: 10,
+      toVersion: 11,
+      statements: ['ALTER TABLE blocked_users ADD COLUMN question_author_only INTEGER NOT NULL DEFAULT 0']
     };
   }
   throw new Error(`Unsupported schema target version: ${targetVersion}`);

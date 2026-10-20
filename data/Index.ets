@@ -114,3 +114,5 @@ export * from './src/main/ets/update/ReleaseMarkdown';
 export * from './src/main/ets/emoji/EmojiRules';
 export * from './src/main/ets/emoji/EmojiStore';
 export * from './src/main/ets/preferences/ThemeColors';
+
+export * from './src/main/ets/repository/FeedTopicResolver';

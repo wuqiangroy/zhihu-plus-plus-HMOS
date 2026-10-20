@@ -197,12 +197,20 @@ export interface FeedTargetSummary {
   excerpt: string;
   url: string;
   voteupCount?: number;
+  /** 移动卡片“万/亿”缩写统计的保守上界；质量过滤不能把缩写当精确值。 */
+  voteupCountUpperBound?: number;
   commentCount?: number;
+  /** 移动推荐页脚的展示文字；空串表示没有统计，仅展示来源标注。 */
+  mobileFooterText?: string;
   thumbnailUrl?: string;
   answerCount?: number;
   visitCount?: number;
   followerCount?: number;
   author?: UserProfile;
+  /** 回答所属问题 ID，用于按需查询提问者。 */
+  questionId?: string;
+  /** 服务端实际返回的具名话题，用于卡片屏蔽菜单；只有 ID 时不补造名称。 */
+  topics?: Array<QuestionTopicSummary>;
   /** 回答所属问题的提问者；仅使用上游真实字段，不按名称推断身份。 */
   questionAuthor?: UserProfile;
   /** Feed 响应中实际返回的作者质量信号；缺省表示上游未返回，不能按 0/未关注处理。 */

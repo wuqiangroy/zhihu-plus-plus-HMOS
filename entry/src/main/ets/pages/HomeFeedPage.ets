@@ -1,6 +1,8 @@
 import { AppDestination, AppDestinationName } from 'core';
 import {
   onThemeColor,
+  ContentRepository,
+  QuestionTopicSummary,
   BlockedFeedHistoryGateway,
   BlockingRuleGateway,
   DEFAULT_THEME_COLOR,
@@ -28,11 +30,13 @@ import {
   FLOATING_TITLE_BAR_OFFSET
 } from './AppPageChrome';
 import { HomeFeedController, HomeFeedPhase, HomeFeedViewState } from './HomeFeedState';
+import { HomeFeedMenuAction, HomeFeedMenuItem, homeFeedMenuItems, resolveHomeFeedBlockUser, resolveHomeFeedTopics } from './HomeFeedMenuState';
 import { DraggableRefreshButton } from './components/DraggableRefreshButton';
 
 @Component
 export struct HomeFeedPage {
   repository: FeedRepository | undefined = new DefaultFeedRepository();
+  contentRepositoryFactory: () => ContentRepository | undefined = () => undefined;
   rules: BlockingRuleGateway | undefined = undefined;
   history: BlockedFeedHistoryGateway | undefined = undefined;
   openedContentStore: OpenedContentStore | undefined = undefined;
@@ -69,14 +73,21 @@ export struct HomeFeedPage {
   @State private canLoadMore: boolean = false;
   @State private errorMessage: string = '';
   @State private requiresLogin: boolean = false;
-  @State private pendingUserBlock?: BlockingUserCandidate = undefined;
-  @State private keywordBlockVisible: boolean = false;
-  @State private keywordBlockInput: string = '';
+  @State private resolvingMenuAuthor: boolean = false;
+  @State private feedMenuVisible: boolean = false;
+  @State private feedMenuIdentity: string = '';
+  @State private feedMenuTopics: Array<QuestionTopicSummary> = [];
+  @State private feedMenuTopicsLoading: boolean = false;
+  @State private feedMenuTopicsFailed: boolean = false;
+  private topicRepository?: ContentRepository = undefined;
+  private topicRequestId: number = 0;
+  private readonly menuTopicsCache: Map<string, Array<QuestionTopicSummary>> = new Map();
   @State private blockingMessage: string = '';
   @State private blockingBusy: boolean = false;
   private controller: HomeFeedController | undefined = undefined;
   private blockingAction?: BlockingActionController;
-  private pendingBlockItem?: FeedItem = undefined;
+  private menuRepository?: ContentRepository = undefined;
+  private menuRequestId: number = 0;
   /** 本会话已批量上报过曝光（touch）的条目，对齐上游 reportedTouchedItems 去重。 */
   private readonly reportedTouchIdentities: Set<string> = new Set<string>();
   private readonly listScroller: ListScroller = new ListScroller();
@@ -109,9 +120,11 @@ export struct HomeFeedPage {
     this.indicator?.dispose();
     this.indicator = undefined;
     this.controller?.deactivate();
-    this.pendingUserBlock = undefined;
-    this.keywordBlockVisible = false;
-    this.keywordBlockInput = '';
+    this.closeFeedMenu();
+    this.menuRequestId += 1;
+    this.menuRepository?.cancel();
+    this.menuRepository = undefined;
+    this.resolvingMenuAuthor = false;
   }
 
   private createBlockingAction(): void {
@@ -259,12 +272,6 @@ export struct HomeFeedPage {
             .fontColor($r('app.color.secondary_text'))
             .width('100%')
         }
-        if (this.pendingUserBlock !== undefined) {
-          this.userBlockDialog()
-        }
-        if (this.keywordBlockVisible) {
-          this.keywordBlockDialog()
-        }
       }
       .alignItems(HorizontalAlign.Start)
       .width('100%')
@@ -378,89 +385,37 @@ export struct HomeFeedPage {
   @Builder
   private feedCard(item: FeedItem) {
     Button({ type: ButtonType.Normal, stateEffect: true }) {
-      Column({ space: $r('app.float.spacing_small') }) {
-        Row({ space: $r('app.float.spacing_xsmall') }) {
-          Text(homeFeedActionLabel(item))
-            .fontSize($r('app.float.secondary_font_size'))
-            .fontColor($r('app.color.secondary_text'))
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .layoutWeight(1)
-          Text(feedKindLabel(item.target.kind))
-            .fontSize($r('app.float.secondary_font_size'))
-            .fontColor(this.resolvedThemeColor)
-
-          // 对齐上游 FeedCardMenuBox：右上角紧凑“更多”符号图标，屏蔽等操作收进菜单。
-          Button({ type: ButtonType.Normal, stateEffect: true }) {
-            SymbolGlyph($r('sys.symbol.ellipsis_circle'))
-              .fontSize(18)
-              .fontColor([$r('app.color.secondary_text')])
-          }
-          .id(`home_feed_block_${item.target.kind}_${item.target.id}`)
-          .width(32)
-          .height(32)
-          .padding(0)
-          .backgroundColor(Color.Transparent)
-          .enabled(!this.blockingBusy && this.blockingAction !== undefined)
-          .bindMenu(this.feedBlockMenu(item))
-          .accessibilityText('屏蔽作者或关键词')
-        }
-        .width('100%')
-
-        // 对齐上游 FeedCard：标题 2 行、摘要 3 行、作者与元信息各 1 行，控制一屏卡片数量。
-        Text(item.target.title)
-          .fontSize($r('app.float.heading_font_size'))
-          .fontWeight(FontWeight.Medium)
-          .fontColor($r('app.color.primary_text'))
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .width('100%')
-
+      Column({ space: $r('app.float.spacing_xsmall') }) {
         if ((item.target.qualityFilterReason ?? '').length > 0) {
-          Text(`质量屏蔽规则：${item.target.qualityFilterReason}`)
+          // 对齐上游 FeedDisplayItem（isFiltered）：标题显示“已屏蔽”，原因放摘要位置，
+          // 标题/摘要/作者/来源与图片均不展示，页脚与菜单行保留。
+          Text('已屏蔽')
+            .id(`home_quality_blocked_${item.target.kind}_${item.target.id}`)
+            .fontSize($r('app.float.heading_font_size'))
+            .fontWeight(FontWeight.Medium)
+            .fontColor($r('app.color.primary_text'))
+            .width('100%')
+          Text(item.target.qualityFilterReason ?? '')
             .id(`home_quality_rule_${item.target.kind}_${item.target.id}`)
-            .fontSize($r('app.float.secondary_font_size'))
-            .fontColor(this.resolvedThemeColor)
-            .width('100%')
-        }
-
-        if (this.showFeedThumbnail && (item.target.thumbnailUrl ?? '').length > 0) {
-          Image(item.target.thumbnailUrl)
-            .width('100%')
-            .height(128)
-            .borderRadius($r('app.float.spacing_small'))
-            .objectFit(ImageFit.Cover)
-            .alt('内容缩略图')
-        }
-
-        if (item.target.excerpt.trim().length > 0) {
-          Text(item.target.excerpt)
             .fontSize($r('app.float.body_font_size'))
             .fontColor($r('app.color.secondary_text'))
-            .maxLines(3)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
             .width('100%')
+        } else {
+          this.feedCardContent(item)
         }
-
-        Row({ space: $r('app.float.spacing_medium') }) {
-          if (item.target.author !== undefined) {
-            Text(item.target.author.name)
-              .fontSize($r('app.float.secondary_font_size'))
-              .fontColor($r('app.color.secondary_text'))
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-              .layoutWeight(1)
-          } else {
-            Blank().layoutWeight(1)
-          }
-          Text(`${item.target.voteupCount ?? '—'} 赞同`)
+        // 对齐上游 FeedCardContent：页脚（details）行与右下角“更多”菜单同排。
+        Row({ space: $r('app.float.spacing_small') }) {
+          Text(homeFeedDetailsLabel(item))
+            .id(`home_feed_footer_${item.target.kind}_${item.target.id}`)
             .fontSize($r('app.float.secondary_font_size'))
             .fontColor($r('app.color.secondary_text'))
-          Text(`${item.target.commentCount ?? '—'} 评论`)
-            .fontSize($r('app.float.secondary_font_size'))
-            .fontColor($r('app.color.secondary_text'))
+            .maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .layoutWeight(1)
+          this.feedCardMenuButton(item)
         }
         .width('100%')
+        .alignItems(VerticalAlign.Center)
       }
       .alignItems(HorizontalAlign.Start)
       .width('100%')
@@ -477,8 +432,99 @@ export struct HomeFeedPage {
       color: $r('app.color.divider_color'),
       radius: this.feedCardStyle === 'card' ? $r('app.float.card_radius') : 0
     })
-    .accessibilityText(`打开${feedKindLabel(item.target.kind)}：${item.target.title}`)
+    .accessibilityText((item.target.qualityFilterReason ?? '').length > 0
+      ? `已屏蔽：${item.target.qualityFilterReason}`
+      : `打开${feedKindLabel(item.target.kind)}：${item.target.title}`)
     .onClick((): void => this.openFeedItem(item))
+  }
+
+  @Builder
+  private feedCardMenuButton(item: FeedItem) {
+    Button({ type: ButtonType.Normal, stateEffect: true }) {
+      SymbolGlyph($r('sys.symbol.ellipsis_circle'))
+        .fontSize(18)
+        .fontColor([$r('app.color.secondary_text')])
+    }
+    .id(`home_feed_block_${item.target.kind}_${item.target.id}`)
+    .width(32)
+    .height(32)
+    .padding(0)
+    .backgroundColor(Color.Transparent)
+    .enabled(!this.blockingBusy && !this.resolvingMenuAuthor)
+    .onClick((): void => this.openFeedMenu(item))
+    .bindMenu(this.feedMenuVisible && this.feedMenuIdentity === feedItemIdentity(item), this.feedMenu(item), {
+      onDisappear: (): void => {
+        if (this.feedMenuIdentity === feedItemIdentity(item)) {
+          this.closeFeedMenu();
+        }
+      }
+    })
+    .accessibilityText('更多选项')
+  }
+
+  @Builder
+  private feedCardContent(item: FeedItem) {
+    // 对齐上游 FeedCard 标准排版：标题 → 头像与昵称 → 摘要（3 行截断）→ 缩略图 → 页脚。
+    Text(item.target.title)
+      .fontSize($r('app.float.heading_font_size'))
+      .fontWeight(FontWeight.Medium)
+      .fontColor($r('app.color.primary_text'))
+      .maxLines(2)
+      .textOverflow({ overflow: TextOverflow.Ellipsis })
+      .width('100%')
+
+    if (item.target.author !== undefined) {
+      Row({ space: $r('app.float.spacing_xsmall') }) {
+        if ((item.target.author.avatarUrl ?? '').length > 0) {
+          Image(item.target.author.avatarUrl)
+            .width(20)
+            .height(20)
+            .borderRadius(10)
+            .alt('用户头像')
+        }
+        Text(item.target.author.name)
+          .fontSize($r('app.float.secondary_font_size'))
+          .fontColor($r('app.color.secondary_text'))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .alignItems(VerticalAlign.Center)
+    }
+
+    Row({ space: $r('app.float.spacing_small') }) {
+      Column({ space: $r('app.float.spacing_xsmall') }) {
+        if (item.target.excerpt.trim().length > 0) {
+          Text(item.target.excerpt)
+            .fontSize($r('app.float.body_font_size'))
+            .fontColor($r('app.color.secondary_text'))
+            .maxLines(3)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .width('100%')
+        }
+        if ((item.recommendationReason?.trim() ?? '').length > 0 ||
+          (item.target.mobileFooterText === undefined && (item.actionText?.trim() ?? '').length > 0)) {
+          Text(homeFeedActionLabel(item))
+            .fontSize($r('app.float.secondary_font_size'))
+            .fontColor($r('app.color.secondary_text'))
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .width('100%')
+        }
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(2)
+
+      if (this.showFeedThumbnail && (item.target.thumbnailUrl ?? '').length > 0) {
+        Image(item.target.thumbnailUrl)
+          .width(60)
+          .height(60)
+          .borderRadius($r('app.float.spacing_small'))
+          .objectFit(ImageFit.Cover)
+          .alt('内容缩略图')
+      }
+    }
+    .width('100%')
+    .alignItems(VerticalAlign.Center)
   }
 
   private openFeedItem(item: FeedItem): void {
@@ -529,27 +575,153 @@ export struct HomeFeedPage {
     });
   }
 
-  private feedBlockMenu(item: FeedItem): Array<MenuElement> {
-    const menu: Array<MenuElement> = [];
-    const author = item.target.author;
-    if (author !== undefined) {
-      menu.push({
-        value: '屏蔽作者',
-        action: (): void => {
-          this.pendingBlockItem = item;
-          this.pendingUserBlock = { userId: author.id, userName: author.name };
+  @Builder
+  private feedMenu(item: FeedItem) {
+    Menu() {
+      ForEach(homeFeedMenuItems(item, this.feedMenuTopics), (entry: HomeFeedMenuItem) => {
+        if (entry.action === HomeFeedMenuAction.APPEARANCE && this.feedMenuTopicsLoading) {
+          MenuItem({ content: '正在加载话题…' }).enabled(false)
+        }
+        if (entry.action === HomeFeedMenuAction.APPEARANCE && this.feedMenuTopicsFailed) {
+          MenuItem({ content: '话题暂时无法加载' }).enabled(false)
+        }
+        MenuItem({ content: entry.label })
+          .id('home_menu_' + entry.action + (entry.topic?.id ?? ''))
+          .onClick((): void => {
+            this.feedMenuVisible = false;
+            this.handleFeedMenu(item, entry);
+          })
+      }, (entry: HomeFeedMenuItem): string => entry.action + (entry.topic?.id ?? ''))
+    }
+  }
+
+  private openFeedMenu(item: FeedItem): void {
+    this.closeFeedMenu();
+    const identity = feedItemIdentity(item);
+    this.feedMenuIdentity = identity;
+    const cached = this.menuTopicsCache.get(identity);
+    this.feedMenuTopics = cached ?? item.target.topics ?? [];
+    this.feedMenuTopicsFailed = false;
+    this.feedMenuTopicsLoading = cached === undefined && this.feedMenuTopics.length === 0 &&
+      item.target.kind !== FeedTargetKind.VIDEO;
+    this.feedMenuVisible = true;
+    if (this.feedMenuTopicsLoading) {
+      void this.loadFeedMenuTopics(item, this.topicRequestId);
+    }
+  }
+
+  private closeFeedMenu(): void {
+    this.feedMenuVisible = false;
+    this.topicRequestId += 1;
+    this.topicRepository?.cancel();
+    this.topicRepository = undefined;
+    this.feedMenuTopicsLoading = false;
+  }
+
+  private async loadFeedMenuTopics(item: FeedItem, requestId: number): Promise<void> {
+    try {
+      this.topicRepository = this.contentRepositoryFactory();
+      if (this.topicRepository === undefined) {
+        throw new Error('Content repository unavailable');
+      }
+      const topics = await resolveHomeFeedTopics(item, this.topicRepository);
+      if (requestId !== this.topicRequestId) {
+        return;
+      }
+      this.feedMenuTopics = topics;
+      // 本次菜单查询获得的真实元数据也供当前卡片的话题过滤与后续菜单复用。
+      item.target.topics = topics;
+      topics.forEach((topic: QuestionTopicSummary): void => {
+        if (!item.target.topicIds.includes(topic.id)) {
+          item.target.topicIds.push(topic.id);
         }
       });
-    }
-    menu.push({
-      value: '屏蔽关键词',
-      action: (): void => {
-        this.pendingBlockItem = item;
-        this.keywordBlockInput = '';
-        this.keywordBlockVisible = true;
+      if (this.menuTopicsCache.size >= 100) {
+        this.menuTopicsCache.clear();
       }
-    });
-    return menu;
+      this.menuTopicsCache.set(feedItemIdentity(item), topics);
+    } catch (_error) {
+      if (requestId === this.topicRequestId) {
+        this.feedMenuTopicsFailed = true;
+      }
+    } finally {
+      if (requestId === this.topicRequestId) {
+        this.feedMenuTopicsLoading = false;
+        this.topicRepository = undefined;
+      }
+    }
+  }
+
+  private handleFeedMenu(item: FeedItem, entry: HomeFeedMenuItem): void {
+    if (entry.action === HomeFeedMenuAction.APPEARANCE) {
+      this.navigate({ name: AppDestinationName.APPEARANCE_SETTINGS });
+    } else if (entry.action === HomeFeedMenuAction.QUALITY_FILTER) {
+      this.navigate({ name: AppDestinationName.RECOMMENDATION_FILTER_SETTINGS });
+    } else if (entry.action === HomeFeedMenuAction.BLOCK_TOPIC && entry.topic !== undefined) {
+      const action = this.blockingAction;
+      if (action !== undefined) {
+        void action.blockTopic(entry.topic.id, entry.topic.name, this.blockContext(item)).then((): void => {
+          if (action.snapshot().phase === BlockingActionPhase.SUCCESS) {
+            this.controller?.removeItem(feedItemIdentity(item));
+            void this.controller?.refresh();
+          }
+        });
+      }
+    } else if (entry.action === HomeFeedMenuAction.BLOCK_USER ||
+      entry.action === HomeFeedMenuAction.BLOCK_QUESTION_AUTHOR) {
+      void this.requestUserBlock(item, entry.action === HomeFeedMenuAction.BLOCK_QUESTION_AUTHOR);
+    }
+  }
+
+  private async requestUserBlock(item: FeedItem, questionAuthor: boolean): Promise<void> {
+    if (this.resolvingMenuAuthor || this.blockingBusy || this.blockingAction === undefined) {
+      return;
+    }
+    const requestId = ++this.menuRequestId;
+    this.resolvingMenuAuthor = true;
+    this.blockingMessage = '';
+    try {
+      this.menuRepository = this.contentRepositoryFactory();
+      const candidate = await resolveHomeFeedBlockUser(item, this.menuRepository, questionAuthor);
+      if (requestId !== this.menuRequestId) {
+        return;
+      }
+      if (candidate === undefined) {
+        this.showMissingBlockUser(questionAuthor);
+        return;
+      }
+      this.getUIContext().showAlertDialog({
+        title: questionAuthor ? '屏蔽提问者' : '屏蔽用户',
+        message: questionAuthor
+          ? `确定要屏蔽提问者「${candidate.userName}」吗？其提出的问题将不再显示，回答别人问题的内容不受影响。`
+          : `确定要屏蔽用户「${candidate.userName}」吗？屏蔽后，该用户的内容将不再显示。`,
+        primaryButton: { value: '取消', action: (): void => {} },
+        secondaryButton: {
+          value: '确定屏蔽',
+          fontColor: this.resolvedThemeColor,
+          action: (): void => {
+            if (requestId === this.menuRequestId) {
+              this.confirmUserBlock(item, candidate, questionAuthor);
+            }
+          }
+        }
+      });
+    } catch (_error) {
+      if (requestId === this.menuRequestId) {
+        this.showMissingBlockUser(questionAuthor);
+      }
+    } finally {
+      if (requestId === this.menuRequestId) {
+        this.resolvingMenuAuthor = false;
+        this.menuRepository = undefined;
+      }
+    }
+  }
+
+  private showMissingBlockUser(questionAuthor: boolean): void {
+    this.blockingMessage = questionAuthor ? '当前条目没有可用的提问者数据，无法屏蔽提问者'
+      : '无法获取屏蔽用户所需的数据，请尝试进入内容详情页操作';
+    this.getUIContext().getPromptAction().showToast({ message: this.blockingMessage });
   }
 
   private blockContext(item: FeedItem): BlockingActionContext {
@@ -560,112 +732,17 @@ export struct HomeFeedPage {
     };
   }
 
-  private confirmUserBlock(): void {
-    const pending = this.pendingUserBlock;
+  private confirmUserBlock(item: FeedItem, candidate: BlockingUserCandidate, questionAuthorOnly: boolean): void {
     const action = this.blockingAction;
-    const item = this.pendingBlockItem;
-    if (pending === undefined || action === undefined || item === undefined) {
+    if (action === undefined) {
       return;
     }
-    this.pendingUserBlock = undefined;
-    this.pendingBlockItem = undefined;
-    const identity = feedItemIdentity(item);
-    action.blockUser(pending.userId, pending.userName, this.blockContext(item)).then((): void => {
+    void action.blockUser(candidate.userId, candidate.userName, this.blockContext(item), questionAuthorOnly).then((): void => {
       if (action.snapshot().phase === BlockingActionPhase.SUCCESS) {
-        this.controller?.removeItem(identity);
+        this.controller?.removeItem(feedItemIdentity(item));
+        void this.controller?.refresh();
       }
     });
-  }
-
-  private confirmKeywordBlock(): void {
-    const action = this.blockingAction;
-    const input = this.keywordBlockInput;
-    const item = this.pendingBlockItem;
-    this.keywordBlockVisible = false;
-    this.keywordBlockInput = '';
-    this.pendingBlockItem = undefined;
-    if (action === undefined || input.trim().length === 0 || item === undefined) {
-      return;
-    }
-    const identity = feedItemIdentity(item);
-    action.blockKeyword(input, this.blockContext(item)).then((): void => {
-      if (action.snapshot().phase === BlockingActionPhase.SUCCESS) {
-        this.controller?.removeItem(identity);
-      }
-    });
-  }
-
-  @Builder
-  private userBlockDialog() {
-    Column({ space: $r('app.float.spacing_small') }) {
-      Text(`确定要屏蔽用户「${this.pendingUserBlock?.userName ?? ''}」吗？`)
-        .fontSize($r('app.float.body_font_size'))
-        .width('100%')
-      Text('屏蔽后，该作者的内容将不再显示。')
-        .fontSize($r('app.float.secondary_font_size'))
-        .fontColor($r('app.color.secondary_text'))
-        .width('100%')
-      Row({ space: $r('app.float.spacing_small') }) {
-        Button('取消')
-          .backgroundColor($r('app.color.control_background'))
-          .fontColor($r('app.color.primary_text'))
-          .layoutWeight(1)
-          .enabled(!this.blockingBusy)
-          .onClick((): void => {
-            this.pendingUserBlock = undefined;
-          })
-        Button('确定屏蔽')
-          .backgroundColor(this.resolvedThemeColor)
-          .fontColor(onThemeColor(this.resolvedThemeColor))
-          .id('home_confirm_block_user')
-          .layoutWeight(1)
-          .enabled(!this.blockingBusy)
-          .onClick((): void => this.confirmUserBlock())
-      }
-      .width('100%')
-    }
-    .width('100%')
-    .padding($r('app.float.spacing_medium'))
-    .backgroundColor($r('app.color.card_background'))
-    .borderRadius($r('app.float.card_radius'))
-  }
-
-  @Builder
-  private keywordBlockDialog() {
-    Column({ space: $r('app.float.spacing_small') }) {
-      Text('输入要屏蔽的关键词（普通文本，不区分大小写）')
-        .fontSize($r('app.float.body_font_size'))
-        .width('100%')
-      TextInput({ text: this.keywordBlockInput, placeholder: '输入关键词' })
-        .id('home_keyword_block_input')
-        .maxLength(200)
-        .onChange((value: string): void => {
-          this.keywordBlockInput = value;
-        })
-      Row({ space: $r('app.float.spacing_small') }) {
-        Button('取消')
-          .backgroundColor($r('app.color.control_background'))
-          .fontColor($r('app.color.primary_text'))
-          .layoutWeight(1)
-          .enabled(!this.blockingBusy)
-          .onClick((): void => {
-            this.keywordBlockVisible = false;
-            this.keywordBlockInput = '';
-          })
-        Button('确认屏蔽')
-          .backgroundColor(this.resolvedThemeColor)
-          .fontColor(onThemeColor(this.resolvedThemeColor))
-          .id('home_confirm_block_keyword')
-          .layoutWeight(1)
-          .enabled(!this.blockingBusy && this.keywordBlockInput.trim().length > 0)
-          .onClick((): void => this.confirmKeywordBlock())
-      }
-      .width('100%')
-    }
-    .width('100%')
-    .padding($r('app.float.spacing_medium'))
-    .backgroundColor($r('app.color.card_background'))
-    .borderRadius($r('app.float.card_radius'))
   }
 
   private applyState(state: HomeFeedViewState): void {
@@ -727,4 +804,23 @@ export function homeFeedActionLabel(item: FeedItem): string {
   }
   const actionText = item.actionText?.trim() ?? '';
   return actionText.length > 0 ? actionText : '推荐内容';
+}
+
+/** 对齐上游 details：类型标注（回答/文章等）与统计拼成页脚文字。 */
+export function homeFeedDetailsLabel(item: FeedItem): string {
+  if (item.target.mobileFooterText !== undefined) {
+    // 移动卡片保留服务端页脚原文（已含“手机版推荐”来源标注），不重复拼接。
+    return homeFeedFooterLabel(item);
+  }
+  // Web 卡对齐上游 detailsText：`回答 · N 赞同 · N 评论`。
+  const stats = `${item.target.voteupCount ?? '—'} 赞同 · ${item.target.commentCount ?? '—'} 评论`;
+  return `${feedKindLabel(item.target.kind)} · ${stats}`;
+}
+
+export function homeFeedFooterLabel(item: FeedItem): string {
+  const mobileFooter = item.target.mobileFooterText;
+  if (mobileFooter !== undefined) {
+    return mobileFooter.trim().length > 0 ? `${mobileFooter} · 手机版推荐` : '手机版推荐';
+  }
+  return `${item.target.voteupCount ?? '—'} 赞同 · ${item.target.commentCount ?? '—'} 评论`;
 }

@@ -72,6 +72,55 @@ async function queryStrings(store: relationalStore.RdbStore, sql: string,
   return rows;
 }
 
+async function seedMigrationDatabase(context: common.Context, name: string, version: number,
+  questionAuthorOnly: boolean = false): Promise<void> {
+  const legacy = await relationalStore.getRdbStore(context,
+    { name: name, securityLevel: relationalStore.SecurityLevel.S1 });
+  try {
+    for (let target = 1; target <= version; target += 1) {
+      const statements = questionAuthorOnly && target === 9
+        ? ['ALTER TABLE blocked_users ADD COLUMN question_author_only INTEGER NOT NULL DEFAULT 0']
+        : schemaMigrationTo(target).statements;
+      for (const sql of statements) await legacy.executeSql(sql);
+      legacy.version = target;
+    }
+    await legacy.insert('opened_content',
+      { content_key: 'answer:42', opened_at: 123, content_type: 'answer', title: 'local' });
+    await legacy.insert('blocked_users', { user_id: 'existing', user_name: '已有用户', created_at: 456 });
+    await legacy.insert('blocked_topics', { topic_id: '11', topic_name: '已有话题', created_at: 789 });
+    if (questionAuthorOnly) {
+      await legacy.executeSql('UPDATE blocked_users SET question_author_only = 1');
+    } else if (version >= 9) {
+      await legacy.insert('remote_read_content', { account_key: 'a', content_key: 'answer:42' });
+      const progress: relationalStore.ValuesBucket = { account_key: 'a', read_time: 123000 };
+      if (version >= 10) progress.last_attempt = 1000;
+      await legacy.insert('remote_history_sync', progress);
+    }
+  } finally { await legacy.close(); }
+}
+
+async function assertMigratedRules(database: AppDatabase, expectedScope: boolean): Promise<void> {
+  expect((await database.open()).version).assertEqual(CURRENT_SCHEMA_VERSION);
+  const local = await new OpenedContentStore(database).query('answer:42');
+  expect(local?.openedAt).assertEqual(123);
+  expect(local?.title).assertEqual('local');
+  const rules = new BlockingRuleStore(database);
+  const snapshot = await rules.loadSnapshot();
+  expect(snapshot.users.length).assertEqual(1);
+  expect(snapshot.users[0].userId).assertEqual('existing');
+  expect(snapshot.users[0].createdAt).assertEqual(456);
+  expect(snapshot.users[0].questionAuthorOnly).assertEqual(expectedScope);
+  expect(snapshot.topics.length).assertEqual(1);
+  expect(snapshot.topics[0].topicId).assertEqual('11');
+  await rules.addUser('new-asker', '新提问者', true);
+  await database.close();
+  const reopened = await rules.loadSnapshot();
+  expect(reopened.users.length).assertEqual(2);
+  expect(reopened.users.find((rule): boolean => rule.userId === 'new-asker')?.questionAuthorOnly).assertTrue();
+  expect(reopened.users.find((rule): boolean => rule.userId === 'existing')?.questionAuthorOnly)
+    .assertEqual(expectedScope);
+}
+
 function median(values: Array<number>): number {
   const sorted = values.slice().sort((left: number, right: number): number => left - right);
   return (sorted[14] + sorted[15]) / 2;
@@ -103,23 +152,28 @@ export default function remoteReadStoreDeviceTest(): void {
     });
 
     it('migratesVersionEightWithoutChangingExistingLocalReads', 0, async () => {
-      const legacy = await relationalStore.getRdbStore(context,
-        { name: name, securityLevel: relationalStore.SecurityLevel.S1 });
-      try {
-        for (let version = 1; version <= 8; version += 1) {
-          for (const sql of schemaMigrationTo(version).statements) await legacy.executeSql(sql);
-          legacy.version = version;
-        }
-        await legacy.insert('opened_content',
-          { content_key: 'answer:42', opened_at: 123, content_type: 'answer', title: 'local' });
-      } finally { await legacy.close(); }
-      const upgraded = await database.open();
-      expect(upgraded.version).assertEqual(CURRENT_SCHEMA_VERSION);
-      const local = await new OpenedContentStore(database).query('answer:42');
-      expect(local?.openedAt).assertEqual(123);
-      expect(local?.title).assertEqual('local');
+      await seedMigrationDatabase(context, name, 8);
+      await assertMigratedRules(database, false);
       expect((await reads.readKeys('a', ['answer:42'])).length).assertEqual(0);
       expect(await reads.watermark('a')).assertEqual(0);
+      expect(await reads.claimSync('a', 1000)).assertTrue();
+    });
+
+    it('upgradesPrVersionNineWithoutLosingQuestionAuthorRules', 0, async () => {
+      await seedMigrationDatabase(context, name, 9, true);
+      await assertMigratedRules(database, true);
+      expect((await reads.readKeys('a', ['answer:42'])).length).assertEqual(0);
+      expect(await reads.watermark('a')).assertEqual(0);
+      expect(await reads.claimSync('a', 1000)).assertTrue();
+    });
+
+    it('upgradesMainVersionTenWithoutResettingRemoteReadsOrSyncAttempts', 0, async () => {
+      await seedMigrationDatabase(context, name, 10);
+      await assertMigratedRules(database, false);
+      expect((await reads.readKeys('a', ['answer:42'])).join(',')).assertEqual('answer:42');
+      expect(await reads.watermark('a')).assertEqual(123000);
+      expect(await reads.claimSync('a', 60999)).assertFalse();
+      expect(await reads.claimSync('a', 61000)).assertTrue();
     });
 
     it('deduplicatesRepeatedImportsAndSeparatesTypesAccountsAndLocalSources', 0, async () => {
@@ -173,23 +227,15 @@ export default function remoteReadStoreDeviceTest(): void {
     });
 
     it('upgradesVersionNineAndPreservesTheExistingRemoteProgress', 0, async () => {
-      const legacy = await relationalStore.getRdbStore(context,
-        { name: name, securityLevel: relationalStore.SecurityLevel.S1 });
-      try {
-        for (let version = 1; version <= 9; version += 1) {
-          for (const sql of schemaMigrationTo(version).statements) await legacy.executeSql(sql);
-          legacy.version = version;
-        }
-        await legacy.insert('remote_history_sync', { account_key: 'a', read_time: 123000 });
-        await legacy.insert('remote_read_content', { account_key: 'a', content_key: 'answer:42' });
-      } finally { await legacy.close(); }
+      await seedMigrationDatabase(context, name, 9);
+      await assertMigratedRules(database, false);
       expect(await reads.watermark('a')).assertEqual(123000);
       expect((await reads.readKeys('a', ['answer:42'])).length).assertEqual(1);
       expect(await reads.claimSync('a', 1000)).assertTrue();
       await reads.saveWatermark('a', 124000);
       expect(await reads.claimSync('a', 60999)).assertFalse();
       expect(await reads.watermark('a')).assertEqual(124000);
-      expect((await database.open()).version).assertEqual(10);
+      expect((await database.open()).version).assertEqual(CURRENT_SCHEMA_VERSION);
     });
 
     it('persistsFailedSyncAttemptsAcrossRecreationAndClaimsOnlyOneConcurrentAttempt', 0, async () => {

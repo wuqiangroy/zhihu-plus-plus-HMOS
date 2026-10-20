@@ -17,6 +17,7 @@ import {
   isSafeBlockingRegex,
   matchBlockingRules,
   normalizeBlockingPreferences,
+  QualityFilterMode,
   validateBlockingIdentifier,
   RecommendationFilterPreferences,
   RecommendationFilterPreferencesGateway,
@@ -84,10 +85,11 @@ class CountingPreferencesGateway implements BlockingPreferencesGateway {
 
 class CountingRecommendationGateway implements RecommendationFilterPreferencesGateway {
   loadCount: number = 0;
+  value: RecommendationFilterPreferences = defaultRecommendationFilterPreferences();
 
   loadRecommendationFilterPreferences(): Promise<RecommendationFilterPreferences> {
     this.loadCount += 1;
-    return Promise.resolve(defaultRecommendationFilterPreferences());
+    return Promise.resolve(this.value);
   }
 
   saveRecommendationFilterPreferences(_value: RecommendationFilterPreferences): Promise<void> {
@@ -244,6 +246,19 @@ export default function blockingRuleMatcherTest(): void {
       expect(matchBlockingRules(value, rules, defaultBlockingPreferences())?.reason).assertEqual('屏蔽提问者：提问者');
     });
 
+    it('questionAuthorOnlyRuleDoesNotHideTheirAnswersToOtherQuestions', 0, () => {
+      const rules = emptyRules();
+      rules.users = [{ userId: 'author-1', userName: '提问者', createdAt: 1, questionAuthorOnly: true }];
+      const value = content();
+      value.contentKind = 'answer';
+      expect(matchBlockingRules(value, rules, defaultBlockingPreferences())).assertUndefined();
+      value.questionAuthorId = 'author-1';
+      expect(matchBlockingRules(value, rules, defaultBlockingPreferences())?.reason).assertEqual('屏蔽提问者：提问者');
+      value.questionAuthorId = undefined;
+      value.contentKind = 'question';
+      expect(matchBlockingRules(value, rules, defaultBlockingPreferences())?.kind).assertEqual(BlockingRuleKind.USER);
+    });
+
     it('rulesOnlyDoesNotApplyRecommendationDefaults', 0, async () => {
       const rules = new CountingRuleGateway();
       const preferences = new CountingPreferencesGateway();
@@ -256,6 +271,54 @@ export default function blockingRuleMatcherTest(): void {
       rules.snapshot.users = [{ userId: 'author-1', userName: '用户', createdAt: 1 }];
       const refreshed = await matcher.createSession();
       expect(refreshed.match(paid)?.kind).assertEqual(BlockingRuleKind.USER);
+    });
+
+    it('distinguishesQualityPlaceholdersHiddenCardsAndUnfilteredCards', 0, async () => {
+      const recommendation = new CountingRecommendationGateway();
+      const matcher = new BlockingRuleMatcher(new CountingRuleGateway(), new CountingPreferencesGateway(),
+        ContentBlockingStrategy.HOME_FULL, recommendation, new CountingRuntimeGateway());
+      const value = content();
+      value.contentKind = 'answer';
+      value.voteupCount = 0;
+      value.authorIsFollowing = false;
+      const rules = await matcher.createSession();
+      expect(rules.qualityReason?.(value)).assertEqual('规则：回答；赞数 < 10，未关注作者');
+      expect(rules.match(value)).assertUndefined();
+
+      recommendation.value.qualityFilterMode = QualityFilterMode.HIDE;
+      const hide = await matcher.createSession();
+      expect(hide.match(value)?.kind).assertEqual(BlockingRuleKind.QUALITY);
+
+      recommendation.value.qualityFilterMode = QualityFilterMode.OFF;
+      const off = await matcher.createSession();
+      expect(off.qualityReason?.(value)).assertUndefined();
+      expect(off.match(value)).assertUndefined();
+
+      recommendation.value.qualityFilterMode = QualityFilterMode.RULES;
+      recommendation.value.reverseBlock = true;
+      value.isPaid = true;
+      const reverse = await matcher.createSession();
+      expect(reverse.qualityReason?.(value)).assertUndefined();
+      expect(reverse.match(value)).assertUndefined();
+    });
+
+    it('preservesAbbreviatedVoteBoundsWhenAddingRuntimeState', 0, async () => {
+      const recommendation = new CountingRecommendationGateway();
+      recommendation.value.qualityFilterMode = QualityFilterMode.HIDE;
+      recommendation.value.answerVoteupThreshold = 19001;
+      const matcher = new BlockingRuleMatcher(new CountingRuleGateway(), new CountingPreferencesGateway(),
+        ContentBlockingStrategy.HOME_FULL, recommendation, new CountingRuntimeGateway());
+      const value = content();
+      value.contentId = '123';
+      value.contentKind = 'answer';
+      value.authorIsFollowing = false;
+      value.voteupCount = 19000;
+      value.voteupCountUpperBound = 19999;
+      const ambiguous = await matcher.createSession();
+      expect(ambiguous.match(value)).assertUndefined();
+      recommendation.value.answerVoteupThreshold = 20000;
+      const blocked = await matcher.createSession();
+      expect(blocked.match(value)?.kind).assertEqual(BlockingRuleKind.QUALITY);
     });
 
     it('homeFullLoadsEachSnapshotOnceAndFlushesOnce', 0, async () => {

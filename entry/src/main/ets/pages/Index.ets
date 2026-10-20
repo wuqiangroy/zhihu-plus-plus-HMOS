@@ -210,7 +210,8 @@ struct Index {
           return state.status === SessionStatus.AUTHENTICATED ? state.profile?.id ?? '' : '';
         }, preferencesStore);
       this.homeRepository = new DefaultFeedRepository(new ZhihuHttpClient(session), homeBlockingMatcher,
-        preferencesStore, preferencesStore, new ZhihuMobileHttpClient(session), session, remoteHistory);
+        preferencesStore, preferencesStore, new ZhihuMobileHttpClient(session), session, remoteHistory,
+        new DefaultContentRepository(new ZhihuHttpClient(session)));
       this.searchRepository = new DefaultSearchRepository(new ZhihuHttpClient(session), blockingMatcher);
       this.followingRepository = new DefaultChannelFeedRepository(new ZhihuHttpClient(session), blockingMatcher);
       this.followingRecommendRepository = new DefaultChannelFeedRepository(new ZhihuHttpClient(session), blockingMatcher);
@@ -342,6 +343,7 @@ struct Index {
   homeContent(reloadToken: number, navigate: (destination: AppDestination) => void) {
     HomeFeedPage({
       repository: this.homeRepository,
+      contentRepositoryFactory: this.hotQuestionRepositoryFactory,
       lastReadTouch: this.lastReadTouchRepository,
       reloadToken: reloadToken,
       navigate: navigate,

@@ -14,12 +14,15 @@ import {
   RecommendationMode
 } from '../preferences/RecommendationFilterPreferences';
 import { FeedRepository } from './FeedRepository';
+import { ContentRepository } from './ContentRepository';
+import { resolveFeedTopics } from './FeedTopicResolver';
+import { QuestionTopicSummary } from '../domain/DomainModels';
 import { RemoteHistorySync } from './RemoteHistorySync';
 
 export const HOME_FEED_INCLUDE =
   'data[*].content,excerpt,headline,target.voteup_count,target.vote_count,target.comment_count,' +
     'target.answer_count,target.follower_count,target.author.badge_v2,target.author.is_following,' +
-    'target.author.follower_count,target.bound_topic_ids,target.question.bound_topic_ids,target.question.author';
+    'target.author.follower_count,target.bound_topic_ids,target.question.bound_topic_ids,target.question.author,target.topics,target.question.topics';
 const HOME_FEED_INCLUDE_QUERY = `include=${encodeURIComponent(HOME_FEED_INCLUDE).replace(/\*/g, '%2A')}`;
 export const HOME_FEED_URL =
   `https://www.zhihu.com/api/v3/feed/topstory/recommend?desktop=true&page_number=1&limit=10&action=down&` +
@@ -119,6 +122,8 @@ export class DefaultFeedRepository implements FeedRepository {
   private readonly startupCache?: HomeFeedStartupCacheGateway;
   private readonly mobileHttpClient?: ZhihuMobileHttpClient;
   private readonly sessionProvider?: SessionCookieProvider;
+  private readonly topicRepository?: ContentRepository;
+  private readonly topicCache: Map<string, Array<QuestionTopicSummary>> = new Map();
   private readonly remoteHistory?: RemoteHistorySync;
   private requestedCursors: Set<string> = new Set<string>();
   private deliveredItemIdentities: Set<string> = new Set<string>();
@@ -130,13 +135,14 @@ export class DefaultFeedRepository implements FeedRepository {
   constructor(httpClient: ZhihuHttpClient = new ZhihuHttpClient(), blockingMatcher?: ContentBlockingMatcher,
     recommendationPreferences?: RecommendationFilterPreferencesGateway, startupCache?: HomeFeedStartupCacheGateway,
     mobileHttpClient?: ZhihuMobileHttpClient, sessionProvider?: SessionCookieProvider,
-    remoteHistory?: RemoteHistorySync) {
+    remoteHistory?: RemoteHistorySync, topicRepository?: ContentRepository) {
     this.httpClient = httpClient;
     this.blockingMatcher = blockingMatcher;
     this.recommendationPreferences = recommendationPreferences;
     this.startupCache = startupCache;
     this.mobileHttpClient = mobileHttpClient;
     this.sessionProvider = sessionProvider;
+    this.topicRepository = topicRepository;
     this.remoteHistory = remoteHistory;
   }
 
@@ -154,6 +160,7 @@ export class DefaultFeedRepository implements FeedRepository {
     this.generation += 1;
     this.httpClient.cancel();
     this.mobileHttpClient?.cancel();
+    this.topicRepository?.cancel();
   }
 
   async loadHomePage(cursor?: string): Promise<FeedPage> {
@@ -198,12 +205,18 @@ export class DefaultFeedRepository implements FeedRepository {
     if (this.blockingMatcher !== undefined) {
       const blockingSession: ContentBlockingSession = await this.blockingMatcher.createSession(
         visibleItems.map((item: FeedItem): string => feedItemIdentity(item)));
+      if (blockingSession.requiresTopicMetadata === true && this.topicRepository !== undefined) {
+        for (let index = 0; index < visibleItems.length; index += 1) {
+          await this.enrichTopicMetadata(visibleItems[index]);
+          if (requestGeneration !== this.generation) {
+            throw new FeedRepositoryFailure(FeedRepositoryFailureKind.CANCELLED);
+          }
+        }
+      }
       visibleItems = visibleItems.filter((item: FeedItem): boolean => {
         const summary = blockableFeedSummary(item);
-        const reason = blockingSession.qualityReason?.(summary);
-        if (reason !== undefined) {
-          item.target.qualityFilterReason = reason;
-        }
+        // 每次按当前会话重算，关闭质量屏蔽/启用反向屏蔽后不得沿用旧原因。
+        item.target.qualityFilterReason = blockingSession.qualityReason?.(summary);
         return blockingSession.match(summary) === undefined;
       });
       await blockingSession.flush?.();
@@ -234,6 +247,27 @@ export class DefaultFeedRepository implements FeedRepository {
       items: items,
       cursor: cursorLoops ? terminalCursor(decodedPage.cursor) : decodedPage.cursor
     };
+  }
+
+  private async enrichTopicMetadata(item: FeedItem): Promise<void> {
+    if (item.target.topicIds.length > 0) {
+      return;
+    }
+    const identity = feedItemIdentity(item);
+    try {
+      let topics = this.topicCache.get(identity);
+      if (topics === undefined) {
+        topics = await resolveFeedTopics(item, this.topicRepository);
+        if (this.topicCache.size >= 100) {
+          this.topicCache.clear();
+        }
+        this.topicCache.set(identity, topics);
+      }
+      item.target.topics = topics;
+      item.target.topicIds = topics.map((topic: QuestionTopicSummary): string => topic.id);
+    } catch (_error) {
+      // 详情失败不能使整页推荐失败，也不能将未知话题当作命中；下次刷新可重试。
+    }
   }
 
   private requireConfiguredLogin(preferences: RecommendationFilterPreferences): void {
@@ -440,6 +474,7 @@ function blockableFeedSummary(item: FeedItem): BlockableContentSummary {
     url: item.target.url,
     topicIds: item.target.topicIds,
     voteupCount: item.target.voteupCount,
+    voteupCountUpperBound: item.target.voteupCountUpperBound,
     answerCount: item.target.answerCount,
     followerCount: item.target.followerCount,
     isPaid: item.target.isPaid
