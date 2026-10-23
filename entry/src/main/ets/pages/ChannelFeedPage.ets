@@ -29,6 +29,7 @@ import {
 import {
   AppPageStatusKind,
   AppPageStatusPanel,
+  FEED_TWO_COLUMN_MIN_WIDTH,
   FeedPullDownIndicatorHost,
   FLOATING_TITLE_BAR_OFFSET
 } from './AppPageChrome';
@@ -84,6 +85,10 @@ export struct ChannelFeedPage {
   };
   @State private phase: ChannelFeedPhase = ChannelFeedPhase.IDLE;
   @State private items: Array<ChannelFeedItem> = [];
+  // 宽屏（横屏/平板/自由窗口拉宽）两列：按容器实测宽度切换；列表按行分组渲染，
+  // 避免在 ForEach 内按索引奇偶判断导致增删条目后错行。
+  @State @Watch('onFeedWidthChanged') private feedWidthVp: number = 0;
+  @State private feedRows: Array<ChannelFeedRow> = [];
   @State private refreshing: boolean = false;
   @State private loadingMore: boolean = false;
   @State private canLoadMore: boolean = false;
@@ -274,22 +279,37 @@ export struct ChannelFeedPage {
               }
               .width('100%')
             }
-            ForEach(this.items, (item: ChannelFeedItem, index: number) => {
+            ForEach(this.feedRows, (row: ChannelFeedRow) => {
               ListItem() {
-                if (item.kind === ChannelFeedItemKind.CONTENT) {
-                  this.contentCard(item, index);
-                } else {
-                  Column({ space: 12 }) {
-                    if (index === 0 || dailyFeedDateAtIndex(this.items, index - 1) !== item.story.date) {
-                      this.dailyDateDivider(item.story.date);
-                    }
-                    this.dailyCard(item);
+                Column({ space: 12 }) {
+                  // 日报日期分隔随行整宽渲染：两列时也不能缩到单列宽度
+                  if (row.dateDivider.length > 0) {
+                    this.dailyDateDivider(row.dateDivider);
                   }
-                  .width('100%')
+                  if (row.items.length > 1) {
+                    // 宽屏两列：一行并排两条等宽卡片；Flex 交叉轴 Stretch 让同行两张卡片等高
+                    Flex({ direction: FlexDirection.Row, alignItems: ItemAlign.Stretch }) {
+                      this.feedColumn(row.items[0], row.startIndex, true)
+                      this.feedColumn(row.items[1], row.startIndex + 1, false)
+                    }
+                    .width('100%')
+                  } else if (this.isTwoColumnFeed()) {
+                    Flex({ direction: FlexDirection.Row, alignItems: ItemAlign.Stretch }) {
+                      this.feedColumn(row.items[0], row.startIndex, true)
+                      // 末行仅剩一条时补等宽占位，避免单张卡片撑满整行
+                      Column()
+                        .layoutWeight(1)
+                    }
+                    .width('100%')
+                  } else {
+                    this.feedRowItem(row.items[0], row.startIndex);
+                  }
                 }
+                .width('100%')
+                .alignItems(HorizontalAlign.Start)
               }
-              .margin({ bottom: this.feedCardStyle === 'card' ? $r('app.float.spacing_medium') : 0 })
-            }, (item: ChannelFeedItem): string => channelFeedItemIdentity(item))
+              .margin({ bottom: this.usesCardSurface() ? $r('app.float.spacing_medium') : 0 })
+            }, (row: ChannelFeedRow): string => channelFeedRowKey(row))
 
             if (this.loadingMore) {
               // 上拉加载更多：与下拉刷新一致的圆形加载动画（onReachEnd 自动触发）
@@ -322,7 +342,7 @@ export struct ChannelFeedPage {
             }
             if (this.source === ChannelFeedSource.DAILY) {
               this.publishDailyViewingDate();
-              if (end >= this.items.length - 3) {
+              if (this.lastItemIndexOfRow(end) >= this.items.length - 3) {
                 this.controller?.loadMore();
               }
             }
@@ -359,6 +379,13 @@ export struct ChannelFeedPage {
         left: $r('app.float.page_padding'),
         right: $r('app.float.page_padding'),
         bottom: $r('app.float.page_padding')
+      })
+      // 宽屏两列：以容器实测宽度判定，覆盖横竖屏旋转与自由窗口缩放
+      .onAreaChange((_oldValue: Area, newValue: Area): void => {
+        const widthVp = typeof newValue.width === 'number' ? newValue.width : Number(newValue.width);
+        if (widthVp > 0 && Math.abs(widthVp - this.feedWidthVp) > 0.5) {
+          this.feedWidthVp = widthVp;
+        }
       })
 
       if (this.showRefreshFab && this.phase === ChannelFeedPhase.READY) {
@@ -449,6 +476,31 @@ export struct ChannelFeedPage {
     });
   }
 
+  /**
+   * 两列中的一列：列容器承担卡片外框，配合 Flex 的 ItemAlign.Stretch 把同一行的两张卡
+   * 拉到等高（卡片本身仍是内容高度、内容顶部对齐）；trailingGap 为行内列间距。
+   */
+  @Builder
+  private feedColumn(item: ChannelFeedItem, index: number, trailingGap: boolean) {
+    Column() {
+      this.feedRowItem(item, index);
+    }
+    .layoutWeight(1)
+    .margin({ right: trailingGap ? $r('app.float.spacing_medium') : 0 })
+    .backgroundColor($r('app.color.surface_background'))
+    .borderRadius($r('app.float.card_radius'))
+  }
+
+  /** 行内单条内容：热榜/关注是通用内容卡，日报是图文条目；index 为信息流中的原始位置（热榜排名用）。 */
+  @Builder
+  private feedRowItem(item: ChannelFeedItem, index: number) {
+    if (item.kind === ChannelFeedItemKind.CONTENT) {
+      this.contentCard(item, index);
+    } else {
+      this.dailyCard(item);
+    }
+  }
+
   @Builder
   private contentCard(item: ChannelContentItem, index: number) {
     Button({ type: ButtonType.Normal, stateEffect: true }) {
@@ -506,14 +558,14 @@ export struct ChannelFeedPage {
     .id(`channel_content_${item.feedItem.target.kind}_${item.feedItem.target.id}`)
     .width('100%')
     .padding($r('app.float.card_padding'))
-    .borderRadius(this.feedCardStyle === 'card' ? $r('app.float.card_radius') : 0)
-    .backgroundColor(this.feedCardStyle === 'card' ? $r('app.color.surface_background') : Color.Transparent)
+    .borderRadius(this.usesCardSurface() ? $r('app.float.card_radius') : 0)
+    .backgroundColor(this.usesCardSurface() ? $r('app.color.surface_background') : Color.Transparent)
     // border 的 radius 优先级高于 borderRadius 属性（未指定时按 0 处理），
     // 卡片模式必须把圆角同步写进 border，否则背景圆角被重置成直角。
     .border({
-      width: { bottom: this.feedCardStyle === 'divider' ? 1 : 0 },
+      width: { bottom: this.usesCardSurface() ? 0 : 1 },
       color: $r('app.color.divider_color'),
-      radius: this.feedCardStyle === 'card' ? $r('app.float.card_radius') : 0
+      radius: this.usesCardSurface() ? $r('app.float.card_radius') : 0
     })
     .accessibilityText(`打开${channelKindLabel(item.feedItem.target.kind)}：${item.feedItem.target.title}`)
     .onClick(() => {
@@ -577,14 +629,14 @@ export struct ChannelFeedPage {
     .id(`channel_daily_${item.story.id}`)
     .width('100%')
     .padding($r('app.float.card_padding'))
-    .borderRadius(this.feedCardStyle === 'card' ? $r('app.float.card_radius') : 0)
-    .backgroundColor(this.feedCardStyle === 'card' ? $r('app.color.surface_background') : Color.Transparent)
+    .borderRadius(this.usesCardSurface() ? $r('app.float.card_radius') : 0)
+    .backgroundColor(this.usesCardSurface() ? $r('app.color.surface_background') : Color.Transparent)
     // border 的 radius 优先级高于 borderRadius 属性（未指定时按 0 处理），
     // 卡片模式必须把圆角同步写进 border，否则背景圆角被重置成直角。
     .border({
-      width: { bottom: this.feedCardStyle === 'divider' ? 1 : 0 },
+      width: { bottom: this.usesCardSurface() ? 0 : 1 },
       color: $r('app.color.divider_color'),
-      radius: this.feedCardStyle === 'card' ? $r('app.float.card_radius') : 0
+      radius: this.usesCardSurface() ? $r('app.float.card_radius') : 0
     })
     .accessibilityText(`知乎日报：${item.story.title}`)
     .onClick((): void => {
@@ -760,6 +812,84 @@ export struct ChannelFeedPage {
     .borderRadius($r('app.float.card_radius'))
   }
 
+  private isTwoColumnFeed(): boolean {
+    return this.feedWidthVp >= FEED_TWO_COLUMN_MIN_WIDTH;
+  }
+
+  /** 两列并排时强制卡片外观：分隔线样式在并排两列下会退化成列内短线。 */
+  private usesCardSurface(): boolean {
+    return this.isTwoColumnFeed() || this.feedCardStyle === 'card';
+  }
+
+  private onFeedWidthChanged(): void {
+    this.rebuildFeedRows(this.items);
+  }
+
+  /** 该条目前是否需要整宽的日报日期分隔（非日报源恒为空串）。 */
+  private dailyDividerAt(items: Array<ChannelFeedItem>, index: number): string {
+    const item = items[index];
+    if (this.source !== ChannelFeedSource.DAILY || item.kind !== ChannelFeedItemKind.DAILY_STORY) {
+      return '';
+    }
+    if (index === 0 || dailyFeedDateAtIndex(items, index - 1) !== item.story.date) {
+      return item.story.date;
+    }
+    return '';
+  }
+
+  /**
+   * 按当前列数把列表切成行：单列每行一条，两列每行两条；跨日期不并排，
+   * 该行需要显示的日期分隔随行记录，渲染时占整行宽度。
+   */
+  private rebuildFeedRows(items: Array<ChannelFeedItem>): void {
+    const columns: number = this.isTwoColumnFeed() ? 2 : 1;
+    const rows: Array<ChannelFeedRow> = [];
+    let rowItems: Array<ChannelFeedItem> = [];
+    let rowStart: number = 0;
+    let rowDivider: string = '';
+    for (let index = 0; index < items.length; index += 1) {
+      const divider: string = this.dailyDividerAt(items, index);
+      if (rowItems.length > 0 && (rowItems.length >= columns || divider.length > 0)) {
+        rows.push({ items: rowItems, startIndex: rowStart, dateDivider: rowDivider });
+        rowItems = [];
+      }
+      if (rowItems.length === 0) {
+        rowStart = index;
+        rowDivider = divider;
+      }
+      rowItems.push(items[index]);
+    }
+    if (rowItems.length > 0) {
+      rows.push({ items: rowItems, startIndex: rowStart, dateDivider: rowDivider });
+    }
+    this.feedRows = rows;
+  }
+
+  /** 列表头部（错误横幅、顶部插槽）占用的非信息流 ListItem 数。 */
+  private leadingListItemCount(): number {
+    let count: number = this.errorMessage.length > 0 ? 1 : 0;
+    if (this.topContentVisible) {
+      count += 1;
+    }
+    return count;
+  }
+
+  private rowAtListIndex(listIndex: number): ChannelFeedRow | undefined {
+    return this.feedRows[listIndex - this.leadingListItemCount()];
+  }
+
+  /** ListItem 索引 → 该行首条内容在信息流中的索引（日报日期、热榜排名按原始索引计算）。 */
+  private firstItemIndexOfRow(listIndex: number): number {
+    const row = this.rowAtListIndex(listIndex);
+    return row === undefined ? 0 : row.startIndex;
+  }
+
+  /** ListItem 索引 → 该行末条内容的索引（预加载阈值判断用）。 */
+  private lastItemIndexOfRow(listIndex: number): number {
+    const row = this.rowAtListIndex(listIndex);
+    return row === undefined ? this.items.length - 1 : row.startIndex + row.items.length - 1;
+  }
+
   private applyState(state: ChannelFeedViewState): void {
     const replacedDailyPage = this.source === ChannelFeedSource.DAILY &&
       (this.phase === ChannelFeedPhase.INITIAL_LOADING || this.refreshing) &&
@@ -773,6 +903,7 @@ export struct ChannelFeedPage {
     }
     this.phase = state.phase;
     this.items = state.items;
+    this.rebuildFeedRows(state.items);
     this.refreshing = state.refreshing;
     this.indicator?.setRefreshing(state.refreshing);
     this.loadingMore = state.loadingMore;
@@ -786,11 +917,27 @@ export struct ChannelFeedPage {
   }
 
   private publishDailyViewingDate(): void {
-    const date = dailyFeedDateAtIndex(this.items, this.firstVisibleIndex);
+    const date = dailyFeedDateAtIndex(this.items, this.firstItemIndexOfRow(this.firstVisibleIndex));
     if (AppStorage.get<string>('dailyViewingDate') !== date) {
       AppStorage.setOrCreate('dailyViewingDate', date);
     }
   }
+}
+
+/** 两列模式下的一行：1~2 条内容；dateDivider 非空时该行前插入整宽的日报日期分隔。 */
+interface ChannelFeedRow {
+  items: Array<ChannelFeedItem>;
+  startIndex: number;
+  dateDivider: string;
+}
+
+/** 行键：由行内各条目标识（含日期分隔）拼成，列数变化时键随之变化以触发整行重建。 */
+function channelFeedRowKey(row: ChannelFeedRow): string {
+  const keys: Array<string> = row.items.map((item: ChannelFeedItem): string => channelFeedItemIdentity(item));
+  if (row.dateDivider.length > 0) {
+    keys.unshift(`d:${row.dateDivider}`);
+  }
+  return keys.join('|');
 }
 
 export function channelFeedDestination(item: ChannelContentItem): AppDestination | undefined {

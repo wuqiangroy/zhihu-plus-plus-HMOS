@@ -30,6 +30,14 @@ export enum AppPageStatusKind {
  */
 export const FLOATING_TITLE_BAR_OFFSET: number = 94;
 
+/**
+ * 信息流（首页/关注/热榜/日报）切换两列的最小可用宽度（vp）。
+ *
+ * 横屏手机（约 640–816vp）与平板、展开态折叠屏满足，竖屏手机（约 360–430vp）不满足；
+ * 判定值来自页面容器的 onAreaChange 实测宽度，旋转与自由窗口缩放都会实时生效。
+ */
+export const FEED_TWO_COLUMN_MIN_WIDTH: number = 600;
+
 @Component
 export struct AppPageHeader {
   /** 当前生效主题色（AppShell 广播），驱动标题栏动作按钮强调色。 */

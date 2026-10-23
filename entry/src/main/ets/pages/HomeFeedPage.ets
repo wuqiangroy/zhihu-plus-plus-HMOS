@@ -26,6 +26,7 @@ import {
 import {
   AppPageStatusKind,
   AppPageStatusPanel,
+  FEED_TWO_COLUMN_MIN_WIDTH,
   FeedPullDownIndicatorHost,
   FLOATING_TITLE_BAR_OFFSET
 } from './AppPageChrome';
@@ -68,6 +69,10 @@ export struct HomeFeedPage {
   };
   @State private phase: HomeFeedPhase = HomeFeedPhase.IDLE;
   @State private items: Array<FeedItem> = [];
+  // 宽屏（横屏/平板/自由窗口拉宽）两列：按容器实测宽度切换，onAreaChange 覆盖旋转与窗口缩放。
+  // 列表按行分组渲染（单列时每行一条），避免在 ForEach 内按索引奇偶做条件渲染导致增删条目后错行。
+  @State @Watch('onFeedWidthChanged') private feedWidthVp: number = 0;
+  @State private feedRows: Array<Array<FeedItem>> = [];
   @State private refreshing: boolean = false;
   @State private loadingMore: boolean = false;
   @State private canLoadMore: boolean = false;
@@ -217,12 +222,36 @@ export struct HomeFeedPage {
                 .margin({ bottom: $r('app.float.spacing_medium') })
               }
 
-              ForEach(this.items, (item: FeedItem) => {
-                ListItem() {
-                  this.feedCard(item);
+              ForEach(this.feedRows, (row: Array<FeedItem>) => {
+                if (row.length > 1) {
+                  // 宽屏两列：一行并排两条等宽卡片；Flex 交叉轴 Stretch 让同行两张卡片等高，
+                  // 卡片外框由列容器承担（与卡片背景同色，不会出现第二层边框）。
+                  ListItem() {
+                    Flex({ direction: FlexDirection.Row, alignItems: ItemAlign.Stretch }) {
+                      this.feedColumn(row[0], true)
+                      this.feedColumn(row[1], false)
+                    }
+                    .width('100%')
+                  }
+                  .margin({ bottom: $r('app.float.spacing_medium') })
+                } else if (this.isTwoColumnFeed()) {
+                  ListItem() {
+                    Flex({ direction: FlexDirection.Row, alignItems: ItemAlign.Stretch }) {
+                      this.feedColumn(row[0], true)
+                      // 末行仅剩一条时补等宽占位，避免单张卡片撑满整行
+                      Column()
+                        .layoutWeight(1)
+                    }
+                    .width('100%')
+                  }
+                  .margin({ bottom: $r('app.float.spacing_medium') })
+                } else {
+                  ListItem() {
+                    this.feedCard(row[0]);
+                  }
+                  .margin({ bottom: this.usesCardSurface() ? $r('app.float.spacing_medium') : 0 })
                 }
-                .margin({ bottom: this.feedCardStyle === 'card' ? $r('app.float.spacing_medium') : 0 })
-              }, (item: FeedItem): string => feedItemIdentity(item))
+              }, (row: Array<FeedItem>): string => feedRowIdentity(row))
 
               if (this.loadingMore) {
                 // 上拉加载更多：与下拉刷新一致的圆形加载动画（onReachEnd 自动触发）
@@ -238,9 +267,7 @@ export struct HomeFeedPage {
               }
             }
             .onScrollIndex((start: number, end: number): void => {
-              const leading = (this.errorMessage.length > 0 ? 1 : 0) +
-                (isUpdateAnnouncementVisible(this.pendingUpdateVersion, this.dismissedUpdateVersion) ? 1 : 0);
-              this.controller?.markVisibleThrough(end - leading);
+              this.controller?.markVisibleThrough(this.lastVisibleFeedIndex(end, this.leadingFeedItemCount()));
               const previous = this.firstVisibleIndex;
               this.firstVisibleIndex = start;
               if (start > previous) {
@@ -282,6 +309,13 @@ export struct HomeFeedPage {
         left: $r('app.float.page_padding'),
         right: $r('app.float.page_padding'),
         bottom: $r('app.float.page_padding')
+      })
+      // 宽屏两列：以容器实测宽度判定，覆盖横竖屏旋转与自由窗口缩放
+      .onAreaChange((_oldValue: Area, newValue: Area): void => {
+        const widthVp = typeof newValue.width === 'number' ? newValue.width : Number(newValue.width);
+        if (widthVp > 0 && Math.abs(widthVp - this.feedWidthVp) > 0.5) {
+          this.feedWidthVp = widthVp;
+        }
       })
 
       if (this.showRefreshFab && this.phase === HomeFeedPhase.READY) {
@@ -382,6 +416,21 @@ export struct HomeFeedPage {
     });
   }
 
+  /**
+   * 两列中的一列：列容器承担卡片外框，配合 Flex 的 ItemAlign.Stretch 把同一行的两张卡
+   * 拉到等高（卡片本身仍是内容高度、内容顶部对齐）；trailingGap 为行内列间距。
+   */
+  @Builder
+  private feedColumn(item: FeedItem, trailingGap: boolean) {
+    Column() {
+      this.feedCard(item);
+    }
+    .layoutWeight(1)
+    .margin({ right: trailingGap ? $r('app.float.spacing_medium') : 0 })
+    .backgroundColor($r('app.color.surface_background'))
+    .borderRadius($r('app.float.card_radius'))
+  }
+
   @Builder
   private feedCard(item: FeedItem) {
     Button({ type: ButtonType.Normal, stateEffect: true }) {
@@ -423,14 +472,14 @@ export struct HomeFeedPage {
     .id(`home_feed_card_${item.target.kind}_${item.target.id}`)
     .width('100%')
     .padding($r('app.float.card_padding'))
-    .borderRadius(this.feedCardStyle === 'card' ? $r('app.float.card_radius') : 0)
-    .backgroundColor(this.feedCardStyle === 'card' ? $r('app.color.surface_background') : Color.Transparent)
+    .borderRadius(this.usesCardSurface() ? $r('app.float.card_radius') : 0)
+    .backgroundColor(this.usesCardSurface() ? $r('app.color.surface_background') : Color.Transparent)
     // border 的 radius 优先级高于 borderRadius 属性（未指定时按 0 处理），
     // 卡片模式必须把圆角同步写进 border，否则背景圆角被重置成直角。
     .border({
-      width: { bottom: this.feedCardStyle === 'divider' ? 1 : 0 },
+      width: { bottom: this.usesCardSurface() ? 0 : 1 },
       color: $r('app.color.divider_color'),
-      radius: this.feedCardStyle === 'card' ? $r('app.float.card_radius') : 0
+      radius: this.usesCardSurface() ? $r('app.float.card_radius') : 0
     })
     .accessibilityText((item.target.qualityFilterReason ?? '').length > 0
       ? `已屏蔽：${item.target.qualityFilterReason}`
@@ -745,9 +794,56 @@ export struct HomeFeedPage {
     });
   }
 
+  private isTwoColumnFeed(): boolean {
+    return this.feedWidthVp >= FEED_TWO_COLUMN_MIN_WIDTH;
+  }
+
+  /** 两列并排时强制卡片外观：分隔线样式在并排两列下会退化成列内短线。 */
+  private usesCardSurface(): boolean {
+    return this.isTwoColumnFeed() || this.feedCardStyle === 'card';
+  }
+
+  private onFeedWidthChanged(): void {
+    this.rebuildFeedRows(this.items);
+  }
+
+  /** 按当前列数把信息流切成行：单列每行一条，两列每行两条（末行可能只有一条）。 */
+  private rebuildFeedRows(items: Array<FeedItem>): void {
+    const columns: number = this.isTwoColumnFeed() ? 2 : 1;
+    const rows: Array<Array<FeedItem>> = [];
+    for (let index = 0; index < items.length; index += columns) {
+      rows.push(items.slice(index, index + columns));
+    }
+    this.feedRows = rows;
+  }
+
+  /** 列表头部（可恢复错误横幅、更新卡片）占用的非信息流 ListItem 数。 */
+  private leadingFeedItemCount(): number {
+    let count: number = this.errorMessage.length > 0 ? 1 : 0;
+    if (isUpdateAnnouncementVisible(this.pendingUpdateVersion, this.dismissedUpdateVersion)) {
+      count += 1;
+    }
+    return count;
+  }
+
+  /** ListItem 索引 → 信息流条目索引：两列时一行承载两条，取该行最后一条。 */
+  private lastVisibleFeedIndex(lastListIndex: number, leading: number): number {
+    const rowIndex: number = lastListIndex - leading;
+    if (rowIndex < 0) {
+      return -1;
+    }
+    const row = this.feedRows[rowIndex];
+    if (row === undefined) {
+      return this.items.length - 1;
+    }
+    const perRow: number = this.isTwoColumnFeed() ? 2 : 1;
+    return rowIndex * perRow + row.length - 1;
+  }
+
   private applyState(state: HomeFeedViewState): void {
     this.phase = state.phase;
     this.items = state.items;
+    this.rebuildFeedRows(state.items);
     if (state.items.length > 0) {
       this.reportLastReadTouches(state.items);
     }
@@ -758,6 +854,11 @@ export struct HomeFeedPage {
     this.errorMessage = state.errorMessage ?? '';
     this.requiresLogin = state.requiresLogin;
   }
+}
+
+/** 信息流行键：两列时由并排两条内容的标识拼成，单列时即单条标识。 */
+function feedRowIdentity(row: Array<FeedItem>): string {
+  return row.map((entry: FeedItem): string => feedItemIdentity(entry)).join('|');
 }
 
 /** lastread/touch 仅支持回答/文章/想法（对齐上游 Feed target 白名单，问题/视频不报）。 */

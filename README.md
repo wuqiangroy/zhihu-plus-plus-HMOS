@@ -28,6 +28,12 @@
 | --- | --- | --- | --- | --- |
 | ![首页截图](assets/images/1_home.jpg) | ![关注截图](assets/images/2_follow.jpg) | ![日报截图](assets/images/3_daily.jpg) | ![个人主页截图](assets/images/4_people.jpg) | ![文章截图](assets/images/5_article.jpg) |
 
+宽屏（横屏手机 / 平板 / 展开态折叠屏）下信息流自动切换为两列：
+
+| 首页（宽屏两列） | 热榜（宽屏两列） | 日报（宽屏两列） |
+| --- | --- | --- |
+| ![首页宽屏两列](docs/ui-screenshots/homepage_wide_screen.jpg) | ![热榜宽屏两列](docs/ui-screenshots/hot_wide_screen.jpg) | ![日报宽屏两列](docs/ui-screenshots/daily_wide_screen.jpg) |
+
 ## 已实现功能
 
 > 鸿蒙版仍在开发中，功能覆盖以各阶段验收文档为准；与安卓版的差异见下方[尚未移植的功能](#尚未移植的功能)。
