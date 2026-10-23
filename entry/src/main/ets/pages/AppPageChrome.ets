@@ -30,6 +30,27 @@ export enum AppPageStatusKind {
  */
 export const FLOATING_TITLE_BAR_OFFSET: number = 94;
 
+/** 加载更多时给悬浮底栏及系统手势区留出空间，圆圈完整停在底栏上方。 */
+@Component
+export struct FeedLoadMoreIndicator {
+  elementId: string = '';
+  @StorageProp('resolvedThemeColor') private resolvedThemeColor: string = DEFAULT_THEME_COLOR;
+  @StorageProp('bottomRectHeight') private bottomRectHeightVp: number = 0;
+
+  build() {
+    Column() {
+      LoadingProgress()
+        .id(this.elementId)
+        .width(40)
+        .height(40)
+        .color(this.resolvedThemeColor)
+    }
+    .width('100%')
+    // 与 ZhihuHdsTabs 的 64vp 底栏同口径，另留 12vp 间隔。
+    .padding({ top: 12, bottom: 64 + Math.max(0, this.bottomRectHeightVp) + 12 })
+  }
+}
+
 @Component
 export struct AppPageHeader {
   /** 当前生效主题色（AppShell 广播），驱动标题栏动作按钮强调色。 */

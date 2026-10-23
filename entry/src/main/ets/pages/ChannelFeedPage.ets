@@ -30,6 +30,7 @@ import {
 import {
   AppPageStatusKind,
   AppPageStatusPanel,
+  FeedLoadMoreIndicator,
   FeedPullDownIndicatorHost,
   FLOATING_TITLE_BAR_OFFSET
 } from './AppPageChrome';
@@ -289,16 +290,11 @@ export struct ChannelFeedPage {
 
 
             if (this.loadingMore) {
-              // 上拉加载更多：与下拉刷新一致的圆形加载动画（onReachEnd 自动触发）
+              // 与首页共用加载区，避让悬浮底栏和系统手势区。
               FlowItem() {
-                LoadingProgress()
-                  .id(`channel_${this.source}_load_more`)
-                  .width(40)
-                  .height(40)
-                  .color(this.resolvedThemeColor)
+                FeedLoadMoreIndicator({ elementId: `channel_${this.source}_load_more` })
               }
               .width('100%')
-              .padding({ top: 12, bottom: 12 })
             }
           }
           .id(`channel_${this.source}_list`)
