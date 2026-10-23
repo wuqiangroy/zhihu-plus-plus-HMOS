@@ -119,15 +119,36 @@ $hdc = "hdc"
   之后只需提供 versionName 时，agent 按此公式自行补全 versionCode，无需再询问。
 
 - 版本 tag：仅用 `HMOSv<versionName>`（如 `HMOSv0.2.1`，与 `AppScope/app.json5` 的 `versionName` 一致）。
-  发版顺序：改 `versionName`/`versionCode` → 写发布说明文稿（建议存 `docs/release-notes/HMOSv<x.y.z>.md`）→
-  `pwsh -NoProfile -File scripts/update-release-catalog.ps1 -SeedPending -Version <x.y.z> -NotesFile <文稿>`
-  预置本版本说明进两份清单（**构建必须在其后**，发行 HAP 才能自带"本版本更新内容"；发布说明经
-  `gh release create --notes-file` 复用同一文稿）→ 完整验证（发行 HAP 以 `-BuildMode release` 出包）→
-  提交（`chore: 应用版本号升至 x.y.z`）→
-  附注 tag（`git tag -a HMOSv0.2.1 -m "<一句里程碑中文摘要>"`）→ 推送仅在用户明确要求时执行
-  （`git push origin dev` + 显式列出 HMOS tag）。仓库继承的上游 `0.x`/`nightly` tag 是 zly2006 的
-  发布记录，**不要推送**，远端只保留 `HMOS*` tag。发版后续（GitHub 发布 Release、更新静态清单）
-  见「发版说明（Release Notes）框架」。
+  发版顺序：改 `versionName`/`versionCode` → 写 `docs/release-notes/HMOSv<x.y.z>.md` →
+  按顺序完成编译/Hypium、Debug 与 Release 验证 → 经授权提交（`chore: 应用版本号升至 x.y.z`）并创建版本 PR →
+  合并 `main` → 在合并后的待发版提交执行
+  `pwsh -NoProfile -File scripts/verify-harmony.ps1 -SkipDependencyInstall -BuildMode release` 并通过 →
+  维护者在该已验证的 `main` 提交手动创建附注 tag →
+  创建 Release 草稿，复用文稿与本次验证通过的未签名 HAP → 经当次明确确认后正式发布 → 更新正式清单。
+  打 tag 前核对 HEAD 仍是刚验证的提交且没有待发布的源码改动；若提交或源码发生变化，先重新验证。
+  tag 后可直接使用该提交已验证的 HAP；如需重新构建，必须从 tag 对应提交运行同一 Release 命令并重新通过校验。
+  上述命令适用于包含本流程脚本的提交。旧 tag 会还原其当时的脚本和工具链要求，不能保证支持现行参数
+  （例如 0.5.6 尚无 `-BuildMode`）；历史重建按该 tag 的说明执行。移植新版出包脚本时，若旧版本缺文稿，
+  可显式传入 `-NotesFile <已核对的本地文稿>`，仍须匹配版本标题与完整正文；不自动联网补全文稿。
+  tag 默认由维护者手动创建；agent 仅在用户另行明确要求时创建。提交、推送、创建 PR 和发布仍分别遵守
+  本文的授权规则，流程描述不构成自动执行许可。仓库继承的上游 `0.x`/`nightly` tag 是 zly2006 的
+  发布记录，**不要推送**，远端只保留 `HMOS*` tag。
+
+- **Release 内置说明自动生成与校验**：文稿必须随版本 PR 提交，首行为
+  `# ZhihuPlusPlus-HMOS v<versionName>` 且包含正文。上述 Release 命令自动从文稿生成打包用内置清单，
+  仅在打包期间写入 `entry/src/main/resources/rawfile/update/`，正常结束或异常退出经 finally 恢复原文件；
+  强杀/断电无法保证 finally 执行。注入前必须逐文件核对两处清单 SHA-256；不一致或缺失则中止并提示
+  检查残留，先核对 diff、保留有意改动，再恢复两处一致，不能直接覆盖现场。
+  `assets/update/` 始终保留正式发布数据。无需手动预置，旧 `-SeedPending` 模式已移除。
+  版本命名产物复制前会解压检查未签名/签名 HAP：历史清单必须包含唯一的当前版本，正文须与文稿完整一致，
+  且当前版本不得携带旧附件哈希；历史按版本降序，version.json 必须等于历史首项（已知最高版本），
+  重建旧版本也不改变该语义；失败则拒绝交付。发行包必须经上述命令生成，不能仅凭
+  DevEco/devecocli/hvigor 裸构建成功判定可发布。交付时记录完整产物路径、版本、大小与 SHA-256，
+  防止不同工作树的同名 HAP 混用。
+  Release 模式记录构建前后的 HEAD 与 `git status --porcelain`；状态或提交变化时拒绝交付。
+  未提交状态可用于本地验证但会告警，必须提交后重新验证才能用于该提交的正式发版。
+  成功后输出 `<未签名HAP路径>.build.json`，包含 Git 状态、文稿摘要及 HAP 路径/大小/SHA-256；
+  打 tag、上传前核对该记录与实际包。该记录不包含被 Git 忽略或 skip-worktree 的配置，也不保证脏工作区可复现。
 
 - 发布产物命名：`ZhihuPlusPlus-HMOS-v<version>-unsigned.hap`（如 `ZhihuPlusPlus-HMOS-v0.2.0-unsigned.hap`）。
   版本命名产物**仅由 Release 出包生成**：`verify-harmony.ps1 -BuildMode release` 构建 + Hypium 全部通过后，
@@ -220,11 +241,17 @@ $hdc = "hdc"
   SHA-256）后，必须运行 `pwsh -NoProfile -File scripts/update-release-catalog.ps1`——自动从
   GitHub API 重新生成 `assets/update/` 与 `entry/src/main/resources/rawfile/update/` 两份清单
   （已发布 HMOSv* Release 的版本、附件 URL/大小/SHA-256、发布说明全文；草稿与预发布自动排除，
-  两处同步写入不漂移），并**随下一次代码变更一并提交**，无需单独开提交。该再生成同时会把
-  发版前 `-SeedPending` 预置的占位条目覆盖为真实附件元数据——**推送远端前必须已完成覆盖**，
-  否则线上清单会出现无附件可下载的待发布版本。清单推送前旧客户端
+  两处同步写入不漂移），并**随下一次代码变更一并提交**，无需单独开提交；用户明确要求时可单独提交/创建 PR。
+  在线清单只接受已正式发布且带有效附件信息的版本，禁止提交构建期占位数据。脚本在写入前校验所有版本的
+  唯一未签名附件、文件名与 tag 版本一致、官方 URL 一致、正整数大小和完整 SHA-256；任一项失败保留原清单。
+  `releases.json` 即使只有一个版本也必须为数组。替换正式 Release 附件后，
+  即使版本号和下载 URL 不变，也必须重新运行本脚本，并核对新大小与 SHA-256，再经授权提交/推送清单更新；
+  已合并的旧清单 PR 不能代替这次更新。清单推送前旧客户端
   仍可经 Atom 备用源发现新版本，但应用内下载源列表与安装包哈希校验要等清单到位。
   机制与代价说明见 `docs/update/hmos-update-catalog.md`。
+  损坏的历史附件阻断生成时，优先修复附件；若决定撤下该历史版本，可显式使用
+  `-ExcludeReleaseTag HMOSv<x.y.z>`（多项用 PowerShell 数组）。脚本告警并将其从两处清单排除，
+  不放行无效附件，不允许排除最新正式版本或不存在的 tag；下次执行仍须明确指定，提交时说明撤下原因。
 
 ## ArkTS / ArkUI 代码约束
 

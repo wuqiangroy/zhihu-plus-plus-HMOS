@@ -12,6 +12,7 @@ param(
   [string]$ExpectedBundleName = 'com.github.zhuoyi233.zhplus',
   [ValidateSet('debug', 'release')]
   [string]$BuildMode = 'debug',
+  [string]$NotesFile = '',
   [ValidateRange(0, 100000)]
   [int]$ExpectedTestCount = 0,
   [switch]$SkipDependencyInstall,
@@ -28,6 +29,7 @@ $script:Module = 'entry'
 $script:Product = 'default'
 $script:BuildMode = $BuildMode
 $script:RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+. (Join-Path $PSScriptRoot 'lib/release-notes.ps1')
 
 function Resolve-ExistingFile {
   param(
@@ -188,11 +190,21 @@ function Get-RegisteredTestCount {
 function Copy-ReleaseArtifacts {
   param(
     [string]$HapDirectory,
-    [string]$VersionName
+    [string]$VersionName,
+    [string]$ExpectedNotes
   )
 
   # 版本命名发行产物仅由 Release 出包生成（构建 + Hypium 全部通过后调用）；
   # Debug 验证不调用本函数，避免用 Debug 包覆盖已验证的发行产物。
+  # 先检查所有待交付包，防止签名包说明缺失时已经覆盖未签名发行产物。
+  foreach ($suffix in @('unsigned', 'signed')) {
+    $source = Join-Path $HapDirectory "entry-default-$suffix.hap"
+    if (Test-Path -LiteralPath $source -PathType Leaf) {
+      Assert-HapReleaseNotes -HapPath $source -VersionName $VersionName -ExpectedNotes $ExpectedNotes
+    } elseif ($suffix -eq 'unsigned') {
+      throw "缺少未签名 HAP：$source"
+    }
+  }
   $copied = @()
   foreach ($suffix in @('unsigned', 'signed')) {
     $source = Join-Path $HapDirectory "entry-default-$suffix.hap"
@@ -333,6 +345,10 @@ function Get-SdkApiVersion {
 $previousLocation = Get-Location
 try {
   Set-Location $script:RepositoryRoot
+  $releaseSourceBefore = $null
+  if (-not $SkipBuild -and $script:BuildMode -eq 'release') {
+    $releaseSourceBefore = Get-ReleaseSourceState -RepositoryRoot $script:RepositoryRoot
+  }
 
   $resolvedDevEcoHome = Find-DevEcoHome
   $sdkCandidates = @(
@@ -416,10 +432,20 @@ try {
 
   $hapDirectory = Join-Path $script:RepositoryRoot "entry\build\$($script:Product)\outputs\$($script:Product)"
 
+  $releaseNotesBody = ''
   if (-not $SkipBuild) {
-    Invoke-Hvigor -ResolvedNode $resolvedNode -ResolvedHvigor $resolvedHvigor `
-      -Arguments (@('assembleHap') + $commonProperties + @('--no-daemon')) `
-      -Description "构建 API $ExpectedCompileApiVersion $($script:BuildMode) HAP" | Out-Null
+    $buildHap = {
+      Invoke-Hvigor -ResolvedNode $resolvedNode -ResolvedHvigor $resolvedHvigor `
+        -Arguments (@('assembleHap') + $commonProperties + @('--no-daemon')) `
+        -Description "构建 API $ExpectedCompileApiVersion $($script:BuildMode) HAP" | Out-Null
+    }
+    if ($script:BuildMode -eq 'release') {
+      $releaseNotesBody = Get-ReleaseNotesBody -RepositoryRoot $script:RepositoryRoot -VersionName $versionName -NotesFile $NotesFile
+      Invoke-WithBundledReleaseNotes -RepositoryRoot $script:RepositoryRoot -VersionName $versionName `
+        -NotesBody $releaseNotesBody -BuildAction $buildHap
+    } else {
+      & $buildHap
+    }
     # 按明确路径校验本次构建产物，不按目录内最新修改时间挑选，避免误用陈旧 HAP。
     $hapPath = Join-Path $hapDirectory 'entry-default-unsigned.hap'
     if (-not (Test-Path -LiteralPath $hapPath -PathType Leaf)) {
@@ -496,7 +522,12 @@ try {
   }
 
   if (-not $SkipBuild -and $script:BuildMode -eq 'release') {
-    Copy-ReleaseArtifacts -HapDirectory $hapDirectory -VersionName $versionName
+    $releaseSourceAfter = Get-ReleaseSourceState -RepositoryRoot $script:RepositoryRoot
+    if ($releaseSourceBefore.head -ne $releaseSourceAfter.head -or
+        ($releaseSourceBefore.status -join "`n") -cne ($releaseSourceAfter.status -join "`n")) {
+      throw 'Release 构建期间 HEAD 或工作区状态发生变化，拒绝交付；请稳定源码后重新验证。'
+    }
+    Copy-ReleaseArtifacts -HapDirectory $hapDirectory -VersionName $versionName -ExpectedNotes $releaseNotesBody
     # 交付前再次核对：版本命名未签名产物必须与本次构建产物哈希一致。
     $finalUnsigned = Join-Path $hapDirectory "ZhihuPlusPlus-HMOS-v$versionName-unsigned.hap"
     $builtUnsigned = Join-Path $hapDirectory 'entry-default-unsigned.hap'
@@ -505,6 +536,8 @@ try {
     if ($finalHash -ne $builtHash) {
       throw "交付前核对失败：$finalUnsigned 与本次构建产物哈希不一致。"
     }
+    Write-ReleaseBuildRecord -HapPath $finalUnsigned -VersionName $versionName -NotesBody $releaseNotesBody `
+      -SourceBefore $releaseSourceBefore -SourceAfter $releaseSourceAfter -NotesFile $NotesFile
   }
 
   Write-Host "HarmonyOS 迁移验证通过：API $ExpectedCompileApiVersion 编译（$($script:BuildMode)），target=$ExpectedTargetSdkVersion，compatible=$ExpectedCompatibleSdkVersion，Hypium $passed/$requiredTestCount。"
