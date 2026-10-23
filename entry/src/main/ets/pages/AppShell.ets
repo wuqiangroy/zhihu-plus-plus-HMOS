@@ -33,6 +33,7 @@ import {
   AppUpdateRelease,
   LoginSessionGateway,
   ReaderTypography,
+  readerPositionKey,
   SessionState,
   SessionStatus,
   shouldAutoCheckForUpdate,
@@ -68,7 +69,7 @@ import {
   topLevelTabForDestination
 } from './TopLevelTabs';
 import { DividerShowType, hdsMaterial, HdsNavDestination, HdsNavigation, HdsNavigationAttribute, HdsNavigationTitleMode, HdsTabsController } from '@kit.UIDesignKit';
-import { getImmersiveTitleBarStyle, getPersistentImmersiveTitleBarStyle } from '../common/style/NavStyles';
+import { getChatTitleBarStyle, getImmersiveTitleBarStyle, getPersistentImmersiveTitleBarStyle } from '../common/style/NavStyles';
 import {
   decodeImmersiveMaterialSupport,
   ImmersiveMaterialSupportState
@@ -505,6 +506,7 @@ export struct AppShell {
         });
       }
       .titleBar({ style: getImmersiveTitleBarStyle(this.immersiveMaterialMode(), this.immersiveMaterialSupportState()), avoidLayoutSafeArea: true, content: { title: { mainTitle: '内容屏蔽' }, divider: { showType: DividerShowType.OFF } } })
+      .hideTitleBar(true)
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.BOTTOM])
       .backgroundColor($r('app.color.page_background'))
     } else if (destination.name === AppDestinationName.BLOCKED_FEED_HISTORY) {
@@ -514,6 +516,7 @@ export struct AppShell {
         });
       }
       .titleBar({ style: getImmersiveTitleBarStyle(this.immersiveMaterialMode(), this.immersiveMaterialSupportState()), avoidLayoutSafeArea: true, content: { title: { mainTitle: '屏蔽记录' }, divider: { showType: DividerShowType.OFF } } })
+      .hideTitleBar(true)
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.BOTTOM])
       .backgroundColor($r('app.color.page_background'))
     } else if (destination.name === AppDestinationName.READ_HISTORY) {
@@ -687,6 +690,8 @@ export struct AppShell {
           }
         );
       }
+      .onShown((): void => this.setReaderRouteVisible('answer', destination.id, true))
+      .onHidden((): void => this.setReaderRouteVisible('answer', destination.id, false))
       .titleBar({ style: getPersistentImmersiveTitleBarStyle(this.immersiveMaterialMode(), this.immersiveMaterialSupportState()), avoidLayoutSafeArea: true, content: { stackBuilder: (): void => this.answerTitleBar(destination.id), divider: { showType: DividerShowType.OFF } } })
       .hideBackButton(true)
       // 沉浸式/图片查看器中隐藏顶栏（对齐上游 topBar={}）；返回键优先关查看器、再退沉浸式。
@@ -717,6 +722,8 @@ export struct AppShell {
           }
         );
       }
+      .onShown((): void => this.setReaderRouteVisible('article', destination.id, true))
+      .onHidden((): void => this.setReaderRouteVisible('article', destination.id, false))
       .titleBar({ style: getPersistentImmersiveTitleBarStyle(this.immersiveMaterialMode(), this.immersiveMaterialSupportState()), avoidLayoutSafeArea: true, content: { stackBuilder: (): void => this.articleTitleBar(destination.id), divider: { showType: DividerShowType.OFF } } })
       .hideBackButton(true)
       // 与回答页一致：沉浸式/图片查看器中隐藏顶栏，返回键优先关查看器。
@@ -803,6 +810,7 @@ export struct AppShell {
       .titleBar({ style: getImmersiveTitleBarStyle(this.immersiveMaterialMode(), this.immersiveMaterialSupportState()), avoidLayoutSafeArea: true,
         content: { title: { mainTitle: peopleTitleText(this.peopleTitleStates, destination.id) },
           divider: { showType: DividerShowType.OFF } } })
+      .hideTitleBar(true)
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.BOTTOM])
       .backgroundColor($r('app.color.page_background'))
     } else if (destination.name === AppDestinationName.PIN) {
@@ -895,8 +903,9 @@ export struct AppShell {
           (destination: AppDestination): void => this.navigate(destination)
         );
       }
-      // 私信为聊天页：首帧无内容滚过标题栏，须用常驻沉浸样式，否则进入时顶栏透明
-      .titleBar({ style: getPersistentImmersiveTitleBarStyle(this.immersiveMaterialMode(), this.immersiveMaterialSupportState()), avoidLayoutSafeArea: true,
+      // 私信为聊天页：首帧列表就定位到末尾，消息会落在标题栏下方；
+      // 用不透明页面底色的顶栏，避免消息正文与标题叠字（见 NavStyles.getChatTitleBarStyle）。
+      .titleBar({ style: getChatTitleBarStyle(), avoidLayoutSafeArea: true,
         content: { title: { mainTitle:
           ((destination as PrivateMessageDestination).peerName ?? '').length > 0
             ? ((destination as PrivateMessageDestination).peerName as string) : '私信' },
@@ -1602,8 +1611,9 @@ export struct AppShell {
       .backgroundColor($r('app.color.page_background'))
       Column()
         .bindSheet(this.aboutVersionSheetShown, this.aboutVersionSheet(), {
+          preferType: SheetType.CENTER,
           height: SheetSize.FIT_CONTENT,
-          dragBar: true,
+          dragBar: false,
           showClose: false,
           maskColor: '#66000000',
           backgroundColor: $r('app.color.surface_background'),
@@ -1615,8 +1625,9 @@ export struct AppShell {
         })
       Column()
         .bindSheet(this.projectLicenseSheetShown, this.projectLicenseSheet(), {
+          preferType: SheetType.CENTER,
           height: SheetSize.FIT_CONTENT,
-          dragBar: true,
+          dragBar: false,
           showClose: false,
           maskColor: '#66000000',
           backgroundColor: $r('app.color.surface_background'),
@@ -1628,8 +1639,9 @@ export struct AppShell {
         })
       Column()
         .bindSheet(this.openSourceLicensesSheetShown, this.openSourceLicensesSheet(), {
+          preferType: SheetType.CENTER,
           height: SheetSize.FIT_CONTENT,
-          dragBar: true,
+          dragBar: false,
           showClose: false,
           maskColor: '#66000000',
           backgroundColor: $r('app.color.surface_background'),
@@ -1641,8 +1653,9 @@ export struct AppShell {
         })
       Column()
         .bindSheet(this.projectHomeHelpShown, this.projectHomeHelpSheet(), {
+          preferType: SheetType.CENTER,
           height: SheetSize.FIT_CONTENT,
-          dragBar: true,
+          dragBar: false,
           showClose: false,
           maskColor: '#66000000',
           backgroundColor: $r('app.color.surface_background'),
@@ -2527,6 +2540,15 @@ export struct AppShell {
     this.tabsController.changeIndex(this.topLevelTabIndex);
   }
 
+  private setReaderRouteVisible(kind: string, id: string, visible: boolean): void {
+    const key = readerPositionKey(kind, id);
+    if (visible) {
+      AppStorage.setOrCreate('readerActiveRouteKey', key);
+    } else if (AppStorage.get<string>('readerActiveRouteKey') === key) {
+      AppStorage.setOrCreate('readerActiveRouteKey', '');
+    }
+  }
+
   private navigate(destination: AppDestination): void {
     const topLevelTab = topLevelTabForDestination(destination);
     if (topLevelTab !== undefined) {
@@ -2745,6 +2767,7 @@ export struct AppShell {
     AppStorage.setOrCreate('contentFontSize', value.fontSize);
     AppStorage.setOrCreate('contentLineHeight', value.lineHeight);
     AppStorage.setOrCreate('contentBlockSpacing', value.blockSpacing);
+    AppStorage.setOrCreate('contentTypographyPreset', value.preset ?? 'comfortable');
   }
 
   private async restoreAppearancePreferences(): Promise<void> {

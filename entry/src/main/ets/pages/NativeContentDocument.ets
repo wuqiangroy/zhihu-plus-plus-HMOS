@@ -18,6 +18,9 @@ import {
 } from '../platform/ShareContracts';
 import {
   DEFAULT_THEME_COLOR,
+  createReaderPositionStore,
+  ReaderPosition,
+  ReaderPositionRepository,
   effectiveSegmentMeta,
   getAppSessionOwner,
   getGuestDeviceCookieManager,
@@ -28,6 +31,7 @@ import {
   toCookieHeader
 } from 'data';
 import {
+  boxedFormulaText,
   FORMULA_EM_PER_EX,
   formulaDisplaySize,
   FormulaDisplaySize,
@@ -60,6 +64,14 @@ import {
   readerHeadingFontSize
 } from './ReaderTypography';
 import { linkCardMetaLine } from './LinkCardMetaText';
+import { readerBlockLeadingSpace } from './ReaderBlockLayout';
+import { readerCaptionLineHeightFp, readerHorizontalPaddingVp } from './ReaderViewportLayout';
+import {
+  readerBlockSignature,
+  readerPositionBlockIndex,
+  readerPositionFraction,
+  readerPositionTargetY
+} from './ReaderPositionAnchor';
 
 /**
  * 块高缺失时的估算兜底（vp）：未渲染块按实测平均块高估，无实测值时用该值。
@@ -68,8 +80,8 @@ import { linkCardMetaLine } from './LinkCardMetaText';
 const DEFAULT_BLOCK_HEIGHT_VP = 48;
 
 /** 暂无实测块时，未测块按"默认块高 + 一个块间距"计入估算。 */
-function defaultEstimatedBlockHeightVp(blockSpacingPercent: number): number {
-  return DEFAULT_BLOCK_HEIGHT_VP + readerBlockSpacing(blockSpacingPercent);
+function defaultEstimatedBlockHeightVp(blockSpacingPercent: number, preset: string): number {
+  return DEFAULT_BLOCK_HEIGHT_VP + readerBlockSpacing(blockSpacingPercent, preset);
 }
 
 /** 对齐上游 telephoto 默认 ZoomSpec(maxZoomFactor = 2f)。 */
@@ -436,6 +448,7 @@ struct ContentInlineFormula {
   /** 排版偏好与宿主同源（AppStorage 广播），行内公式所在段落随字号/行高联动。 */
   @StorageProp('contentFontSize') private fontSizePercent: number = 100;
   @StorageProp('contentLineHeight') private lineHeightPercent: number = 160;
+  @StorageProp('contentTypographyPreset') private typographyPreset: string = 'comfortable';
   @StorageProp('formulaForegroundColor') private formulaColor: string = '#111111';
   @StorageProp('resolvedThemeColor') private resolvedThemeColor: string = DEFAULT_THEME_COLOR;
   /** 正文内联链接点击回调（行内公式所在段落同样生效）。 */
@@ -448,12 +461,23 @@ struct ContentInlineFormula {
   private pixelMaps: Map<string, image.PixelMap> = new Map();
   /** 公式 SVG 固有尺寸（ex 单位，run.id → exSize）：显示尺寸按 ex × 字号换算。 */
   private formulaExSizes: Map<string, FormulaDisplaySize> = new Map();
-  @State private formulaAvailableWidth: number = 320;
+  @State @Watch('onFormulaWidthChanged') private formulaAvailableWidth: number = 320;
   private active: boolean = false;
   private loadGeneration: number = 0;
 
   aboutToAppear(): void {
     this.active = true;
+    this.loadFormulas();
+  }
+
+  private onFormulaWidthChanged(): void {
+    if (this.active && this.item.inlineRuns.some((run: ReaderInlineRun): boolean =>
+      run.kind === ReaderInlineKind.FORMULA && boxedFormulaText(run.text) !== undefined)) {
+      this.loadFormulas();
+    }
+  }
+
+  private loadFormulas(): void {
     const generation = ++this.loadGeneration;
     this.item.inlineRuns.forEach((run: ReaderInlineRun): void => {
       if (run.kind === ReaderInlineKind.FORMULA) {
@@ -483,10 +507,10 @@ struct ContentInlineFormula {
           this.pixelMaps.get(run.id) === undefined) {
           if (run.kind === ReaderInlineKind.TEXT) {
             Span(run.text)
-              .fontSize(readerBodyFontSize(this.fontSizePercent) *
+              .fontSize(readerBodyFontSize(this.fontSizePercent, this.typographyPreset) *
                 (run.referenceNumero !== undefined ? 0.75 : 1))
               .baselineOffset(run.referenceNumero !== undefined ?
-                LengthMetrics.vp(readerBodyFontSize(this.fontSizePercent) * 0.35) : LengthMetrics.vp(0))
+                LengthMetrics.vp(readerBodyFontSize(this.fontSizePercent, this.typographyPreset) * 0.35) : LengthMetrics.vp(0))
               .fontColor((run.linkUrl ?? '').length > 0 || run.referenceNumero !== undefined
                 ? this.resolvedThemeColor : $r('app.color.primary_text'))
               .fontWeight(run.bold === true ? FontWeight.Bold : FontWeight.Normal)
@@ -528,8 +552,8 @@ struct ContentInlineFormula {
         }
       }, (run: ReaderInlineRun): string => run.id)
     }
-    .fontSize(readerBodyFontSize(this.fontSizePercent))
-    .lineHeight(readerBodyLineHeight(this.fontSizePercent, this.lineHeightPercent))
+    .fontSize(readerBodyFontSize(this.fontSizePercent, this.typographyPreset))
+    .lineHeight(readerBodyLineHeight(this.fontSizePercent, this.lineHeightPercent, this.typographyPreset))
     .fontColor($r('app.color.primary_text'))
     // 鸿蒙原生长按选字：启用系统文本选择菜单（复制 / 全选 / 翻译 / 分享等"更多操作"）。
     .copyOption(CopyOptions.LocalDevice)
@@ -545,14 +569,20 @@ struct ContentInlineFormula {
   private displaySize(id: string): FormulaDisplaySize {
     const exSize = this.formulaExSizes.get(id);
     return formulaDisplaySize(exSize?.width ?? 0, exSize?.height ?? 0,
-      readerBodyFontSize(this.fontSizePercent), this.formulaAvailableWidth);
+      this.formulaFontSizeVp(), this.formulaAvailableWidth);
+  }
+
+  private formulaFontSizeVp(): number {
+    const context = this.getUIContext();
+    return context.px2vp(context.fp2px(readerBodyFontSize(this.fontSizePercent, this.typographyPreset)));
   }
 
   private async loadFormula(run: ReaderInlineRun, generation: number): Promise<void> {
     let pixelMap: image.PixelMap | undefined = undefined;
     try {
       const result = await loadFormulaPixelMap(run.sourceUrl, await this.formulaCookieHeader(),
-        this.formulaColor, formulaDecodeDensity(readerBodyFontSize(this.fontSizePercent)));
+        this.formulaColor, formulaDecodeDensity(this.formulaFontSizeVp()),
+        this.getUIContext().vp2px(this.formulaAvailableWidth));
       pixelMap = result.pixelMap;
       if (!this.active || this.loadGeneration !== generation) {
         await pixelMap.release();
@@ -566,7 +596,7 @@ struct ContentInlineFormula {
       this.pixelMaps.set(run.id, pixelMap);
       this.formulaExSizes.set(run.id, result.exSize);
       pixelMap = undefined;
-      this.loadedRunIds = this.loadedRunIds.concat(run.id);
+      this.loadedRunIds = this.loadedRunIds.filter((id: string): boolean => id !== run.id).concat(run.id);
     } catch (_error) {
       await pixelMap?.release();
       if (this.active && this.loadGeneration === generation) {
@@ -610,8 +640,9 @@ struct ContentBlockFormula {
   @State private pixelMap: image.PixelMap | undefined = undefined;
   /** 公式 SVG 固有尺寸（ex 单位）：显示尺寸按 ex × 字号换算。 */
   @State private formulaExSize: FormulaDisplaySize = { width: 0, height: 0 };
-  @State private formulaAvailableWidth: number = 320;
+  @State @Watch('onFormulaWidthChanged') private formulaAvailableWidth: number = 320;
   @StorageProp('contentFontSize') private fontSizePercent: number = 100;
+  @StorageProp('contentTypographyPreset') private typographyPreset: string = 'comfortable';
   @StorageProp('formulaForegroundColor') private formulaColor: string = '#111111';
   /** 加载失败兜底 Text 的选区状态回调（转发宿主，语义同 NativeContentDocument.onBodySelectionActive）。 */
   onBodySelectionActive?: (active: boolean) => void;
@@ -621,6 +652,12 @@ struct ContentBlockFormula {
   aboutToAppear(): void {
     this.active = true;
     this.loadFormula(++this.loadGeneration);
+  }
+
+  private onFormulaWidthChanged(): void {
+    if (this.active && boxedFormulaText(this.item.text) !== undefined) {
+      this.loadFormula(++this.loadGeneration);
+    }
   }
 
   aboutToDisappear(): void {
@@ -669,14 +706,20 @@ struct ContentBlockFormula {
 
   private blockDisplaySize(): FormulaDisplaySize {
     return formulaDisplaySize(this.formulaExSize.width, this.formulaExSize.height,
-      readerBodyFontSize(this.fontSizePercent), this.formulaAvailableWidth);
+      this.formulaFontSizeVp(), this.formulaAvailableWidth);
+  }
+
+  private formulaFontSizeVp(): number {
+    const context = this.getUIContext();
+    return context.px2vp(context.fp2px(readerBodyFontSize(this.fontSizePercent, this.typographyPreset)));
   }
 
   private async loadFormula(generation: number): Promise<void> {
     let pixelMap: image.PixelMap | undefined = undefined;
     try {
       const result = await loadFormulaPixelMap(this.item.sourceUrl, await this.formulaCookieHeader(),
-        this.formulaColor, formulaDecodeDensity(readerBodyFontSize(this.fontSizePercent)));
+        this.formulaColor, formulaDecodeDensity(this.formulaFontSizeVp()),
+        this.getUIContext().vp2px(this.formulaAvailableWidth));
       pixelMap = result.pixelMap;
       if (!this.active || this.loadGeneration !== generation) {
         await pixelMap.release();
@@ -720,6 +763,12 @@ struct ContentBlockFormula {
 @Component
 export struct NativeContentDocument {
   html: string = '';
+  /** 仅真实回答/文章传入；问题列表和相邻回答预览不读写进度。 */
+  positionKey: string = '';
+  /** 导航目的地身份保持不变；在同一路由内切换回答时，保存键仍使用实际回答 ID。 */
+  positionOwnerKey: string = '';
+  @StorageProp('readerActiveRouteKey') @Watch('onPositionActiveChanged') private positionVisibleOwner: string = '';
+  @StorageProp('readerPositionFlushTick') @Watch('onPositionBackground') private positionFlushTick: number = 0;
   emptyMessage: string = '正文为空';
   /** 服务端返回的他人划线（segment_infos），按段落 pid 对齐渲染蓝色高亮。 */
   @Prop segmentInfos: SegmentInfoParagraph[] = [];
@@ -775,7 +824,11 @@ export struct NativeContentDocument {
    * 滚动时正文才会从玻璃顶栏下穿过（顶栏占位式布局下内容到不了顶栏后面，无透光）。
    * 0 表示不额外让位（沉浸阅读隐藏顶栏 / 非详情页场景）。
    */
-  topInsetVp: number = 0;
+  @Prop topInsetVp: number = 0;
+  /** 动态文末避让，随操作栏实测高度及沉浸状态更新。 */
+  @Prop bottomInsetVp: number = 100;
+  /** 回答/文章阅读布局：独立正文边距，信息头到正文至少留 24vp；其他宿主沿用原布局。 */
+  readingLayout: boolean = false;
   /** 问题页正文折叠预览：正文超阈值（纯文本≥100 字或含图）时收起为 180vp 视口。 */
   collapsible: boolean = false;
   @State private detailExpanded: boolean = false;
@@ -784,6 +837,9 @@ export struct NativeContentDocument {
    * 首帧测量偏小若被存死，内容长高后视口将永久被压小（正文整块消失）。 */
   @State private naturalHeightVp: number = 0;
   private blocks: ReaderBlock[] = [];
+  private previousBlocks: Map<string, ReaderBlock> = new Map();
+  /** 惰性列表的块身份随排版/主题变化，重建捕获过旧字号的 Span 与公式组件。 */
+  @State private renderRevision: number = 0;
   @State private empty: boolean = true;
   @State private failedCardCoverIds: Array<string> = [];
   /** 推荐阅读卡片站内元数据（卡片 url → meta）：aboutToAppear 异步回填，重赋值触发重渲染。 */
@@ -797,6 +853,20 @@ export struct NativeContentDocument {
   private lastYOffset: number = 0;
   private readonly dataSource: ReaderBlockDataSource = new ReaderBlockDataSource();
   private readonly scroller: Scroller = new Scroller();
+  private positionStore?: ReaderPositionRepository = undefined;
+  private pendingPosition?: ReaderPosition = undefined;
+  private positionSnapshot?: ReaderPosition = undefined;
+  private positionMounted: boolean = false;
+  private positionWasActive: boolean = false;
+  private positionWritable: boolean = false;
+  private positionFirstIndex: number = 0;
+  private positionLastIndex: number = 0;
+  private positionTargetIndex: number = 0;
+  private positionNeedsJump: boolean = false;
+  private positionRestoreStarted: number = 0;
+  private positionLayoutChanged: number = 0;
+  private positionRestoreTimer: number = -1;
+  private positionSaveTimer: number = -1;
   /**
    * 正文排版偏好（AppStorage 广播，键名与持久化键同名，对齐上游 contentFontSize 等）：
    * 设置页滑块实时写入，详情页开着即联动。
@@ -804,6 +874,8 @@ export struct NativeContentDocument {
   @StorageProp('contentFontSize') @Watch('onTypographyChanged') private fontSizePercent: number = 100;
   @StorageProp('contentLineHeight') @Watch('onTypographyChanged') private lineHeightPercent: number = 160;
   @StorageProp('contentBlockSpacing') @Watch('onTypographyChanged') private blockSpacingPercent: number = 100;
+  @StorageProp('contentTypographyPreset') @Watch('onTypographyChanged') private typographyPreset: string = 'comfortable';
+  @StorageProp('systemFontSizeScale') @Watch('onTypographyChanged') private systemFontSizeScale: number = 1;
   @StorageProp('showPageTurnFab') private showPageTurnFab: boolean = false;
   @StorageProp('volumeKeyPageTurn') private volumeKeyPageTurn: boolean = false;
   @StorageProp('pageTurnPercent') private pageTurnPercent: number = 90;
@@ -819,7 +891,7 @@ export struct NativeContentDocument {
    * 新实例走 aboutToAppear 首载路径（实测可靠），且创建时直读 AppStorage 当前
    * formulaForegroundColor，天然免疫"颜色与 tick 两个 @StorageProp 广播时序竞态"。
    */
-  @StorageProp('appearanceThemeTick') private formulaRecreateTick: number = 0;
+  @StorageProp('appearanceThemeTick') @Watch('onAppearanceChanged') private formulaRecreateTick: number = 0;
   /**
    * 字号变化 tick：onTypographyChanged 检测到字号档位变化时递增。公式栅格按载入时
    * 字号密度解码（见 formulaDecodeDensity），字号调整后需整体销毁重建公式组件才能
@@ -831,6 +903,7 @@ export struct NativeContentDocument {
   @State private pageTurnGuideVisible: boolean = false;
   /** 正文视口高度（vp）：List 的 onAreaChange 回填，供阅读进度条换算拇指高度。 */
   @State private viewportHeightVp: number = 0;
+  @State private viewportWidthVp: number = 0;
   /** 正文内容总高（vp）：本页 SDK 无最大滚动距离 API，按实测块高估算、触底时校准。 */
   @State private contentHeightVp: number = 0;
   /** 当前滚动偏移（vp）：onDidScroll 回填，驱动阅读进度条拇指位置。 */
@@ -862,7 +935,7 @@ export struct NativeContentDocument {
         Column({ space: this.blockSpacing() }) {
           ForEach(this.blocks, (item: ReaderBlock) => {
             this.readerBlock(item)
-          }, (item: ReaderBlock): string => item.id)
+          }, (item: ReaderBlock): string => `${item.id}:${this.renderRevision}`)
         }
         .width('100%')
         // 按钮保留区（上游 QUESTION_DETAIL_TOGGLE_ZONE 思路）：计入测量高，
@@ -950,10 +1023,187 @@ export struct NativeContentDocument {
     const blocks = parseZhihuHtml(this.html);
     this.empty = blocks.length === 0;
     this.blocks = blocks;
+    this.previousBlocks.clear();
+    for (let index = 1; index < blocks.length; index++) {
+      this.previousBlocks.set(blocks[index].id, blocks[index - 1]);
+    }
     this.dataSource.replace(blocks);
     this.loadLinkCardMetas(blocks);
     const plainLength = this.html.replace(/<[^>]*>/g, '').trim().length;
     this.collapsibleActive = this.collapsible && (plainLength >= 100 || this.html.includes('<img'));
+    this.prepareReaderPosition();
+  }
+
+  private prepareReaderPosition(): void {
+    this.positionMounted = true;
+    this.positionWasActive = this.positionIsActive();
+    this.positionRestoreStarted = 0;
+    this.pendingPosition = undefined;
+    this.positionWritable = false;
+    const context = getAbilityContext();
+    if (!this.readingLayout || this.positionKey.length === 0 || context === undefined || this.empty) { return; }
+    try {
+      this.positionStore = createReaderPositionStore(context);
+      const saved = this.positionStore.load(this.positionKey);
+      const index = saved === undefined ? -1 : readerPositionBlockIndex(saved, this.blocks);
+      if (saved !== undefined && (saved.blockIndex === -1 || index >= 0)) {
+        this.pendingPosition = saved;
+        this.positionTargetIndex = index + 1;
+        this.positionNeedsJump = true;
+        this.positionLayoutChanged = Date.now();
+      }
+      this.positionWritable = this.pendingPosition === undefined;
+    } catch (_error) {
+      // 进度损坏或本地存储不可用时仍能从顶部阅读。
+      this.positionWritable = true;
+    }
+  }
+
+  private positionIsActive(): boolean {
+    return this.positionOwnerKey.length > 0 && this.positionVisibleOwner === this.positionOwnerKey;
+  }
+
+  private schedulePositionRestore(layoutChanged: boolean = false): void {
+    if (layoutChanged) { this.positionLayoutChanged = Date.now(); }
+    if (!this.positionMounted || !this.positionIsActive() || this.pendingPosition === undefined || this.viewportHeightVp <= 0 ||
+      this.viewportWidthVp <= 0 || this.positionRestoreTimer >= 0) { return; }
+    this.positionRestoreTimer = setTimeout((): void => {
+      this.positionRestoreTimer = -1;
+      this.adjustReaderPosition();
+    }, 80);
+  }
+
+  private adjustReaderPosition(): void {
+    const saved = this.pendingPosition;
+    if (!this.positionMounted || !this.positionIsActive() || saved === undefined) { return; }
+    const now = Date.now();
+    if (this.positionRestoreStarted === 0) { this.positionRestoreStarted = now; }
+    const expired = now - this.positionRestoreStarted >= 8000;
+    try {
+      if (this.positionNeedsJump) {
+        this.positionNeedsJump = false;
+        if (saved.blockIndex === -1 && saved.fraction === 0) {
+          this.scroller.scrollEdge(Edge.Top);
+        } else if (saved.atEnd) {
+          this.scroller.scrollEdge(Edge.Bottom);
+        } else {
+          this.scroller.scrollToIndex(this.positionTargetIndex, false, ScrollAlign.START);
+        }
+        this.schedulePositionRestore();
+        return;
+      }
+      const rect = this.scroller.getItemRect(this.positionTargetIndex);
+      if (!saved.atEnd && !(rect.height > 0)) {
+        if (!expired) {
+          this.positionNeedsJump = true;
+          this.schedulePositionRestore();
+        } else { this.finishPositionRestore(false); }
+        return;
+      }
+      const delta = saved.atEnd || (saved.blockIndex === -1 && saved.fraction === 0) ? 0 :
+        rect.y - readerPositionTargetY(saved.fraction, rect.height, this.topInsetVp);
+      if (saved.atEnd) {
+        if (!this.scroller.isAtEnd()) { this.scroller.scrollEdge(Edge.Bottom); }
+      } else if (Math.abs(delta) > 0.5) {
+        this.scroller.scrollBy(0, delta);
+      }
+      // 等待惰性块、图片及公式排版稳定；上方块变高时以同一段落再次校正。
+      if (expired || (Math.abs(delta) <= 0.5 && now - this.positionLayoutChanged >= 1500 &&
+        now - this.positionRestoreStarted >= 2000)) {
+        this.finishPositionRestore(true);
+      } else { this.schedulePositionRestore(); }
+    } catch (_error) {
+      if (expired) { this.finishPositionRestore(false); } else { this.schedulePositionRestore(); }
+    }
+  }
+
+  private finishPositionRestore(success: boolean): void {
+    this.pendingPosition = undefined;
+    this.positionWritable = success;
+    if (success) { this.persistReaderPosition(); }
+  }
+
+  private cancelPositionRestore(): void {
+    if (this.positionStore !== undefined) { this.positionWritable = true; }
+    if (this.pendingPosition === undefined) { return; }
+    if (this.positionRestoreTimer >= 0) { clearTimeout(this.positionRestoreTimer); }
+    this.positionRestoreTimer = -1;
+    this.pendingPosition = undefined;
+    this.positionWritable = true;
+  }
+
+  private onPositionActiveChanged(): void {
+    const active = this.positionIsActive();
+    const wasActive = this.positionWasActive;
+    this.positionWasActive = active;
+    if (!active && wasActive) {
+      this.persistReaderPosition(true);
+      if (this.positionSaveTimer >= 0) { clearTimeout(this.positionSaveTimer); }
+      if (this.positionRestoreTimer >= 0) { clearTimeout(this.positionRestoreTimer); }
+      this.positionSaveTimer = -1;
+      this.positionRestoreTimer = -1;
+    } else if (active && !wasActive) {
+      this.positionRestoreStarted = 0;
+      this.schedulePositionRestore(true);
+    }
+  }
+
+  private onPositionBackground(): void {
+    if (this.positionIsActive()) { this.persistReaderPosition(true); }
+  }
+
+  private captureReaderPosition(): ReaderPosition | undefined {
+    if (this.blocks.length === 0) { return undefined; }
+    if (this.scrollYVp <= 1) {
+      const top: ReaderPosition = {
+        version: 1, blockId: '', signature: '00000000', blockIndex: -1, fraction: 0, atEnd: false
+      };
+      return top;
+    }
+    const last = this.blocks.length - 1;
+    if (this.atBottomEdge || this.positionFirstIndex > this.blocks.length) {
+      const end: ReaderPosition = { version: 1, blockId: this.blocks[last].id,
+        signature: readerBlockSignature(this.blocks[last]), blockIndex: last, fraction: 1, atEnd: true };
+      return end;
+    }
+    for (let index = this.positionFirstIndex; index <= Math.min(this.positionLastIndex, this.blocks.length); index++) {
+      const rect = this.scroller.getItemRect(index);
+      if (rect.height <= 0 || rect.y + rect.height <= this.topInsetVp) { continue; }
+      const block = index > 0 ? this.blocks[index - 1] : undefined;
+      const position: ReaderPosition = {
+        version: 1, blockId: block?.id ?? '', signature: block === undefined ? '00000000' : readerBlockSignature(block),
+        blockIndex: index - 1, fraction: readerPositionFraction(rect.y, rect.height, this.topInsetVp), atEnd: false
+      };
+      return position;
+    }
+    return undefined;
+  }
+
+  private schedulePositionSave(): void {
+    if (!this.positionMounted || !this.positionIsActive() || !this.positionWritable || this.positionStore === undefined ||
+      this.positionSaveTimer >= 0) { return; }
+    // 持续滚动也定期落盘，不能只依赖退出回调（强制停止不会触发它）。
+    this.positionSaveTimer = setTimeout((): void => {
+      this.positionSaveTimer = -1;
+      this.persistReaderPosition();
+    }, 500);
+  }
+
+  private persistReaderPosition(synchronous: boolean = false): void {
+    if (!this.positionMounted || (!this.positionIsActive() && !synchronous) ||
+      !this.positionWritable || this.positionStore === undefined) { return; }
+    if (this.positionSaveTimer >= 0) { clearTimeout(this.positionSaveTimer); }
+    this.positionSaveTimer = -1;
+    try {
+      this.positionSnapshot = this.captureReaderPosition() ?? this.positionSnapshot;
+    } catch (_error) {
+      // List 已卸载时，使用最后一次有效快照；不以初始零偏移覆盖旧记录。
+    }
+    if (this.positionSnapshot !== undefined) {
+      try {
+        this.positionStore.save(this.positionKey, this.positionSnapshot, synchronous);
+      } catch (_error) { console.error('Reading position save failed'); }
+    }
   }
 
   /**
@@ -1004,6 +1254,13 @@ export struct NativeContentDocument {
   }
 
   aboutToDisappear(): void {
+    if (this.positionWasActive) { this.persistReaderPosition(true); }
+    this.positionMounted = false;
+    this.positionWasActive = false;
+    if (this.positionRestoreTimer >= 0) { clearTimeout(this.positionRestoreTimer); }
+    if (this.positionSaveTimer >= 0) { clearTimeout(this.positionSaveTimer); }
+    this.positionRestoreTimer = -1;
+    this.positionSaveTimer = -1;
     this.linkCardMetaGeneration += 1;
     clearFormulaByteCache();
     if (this.bodySelectionRestoreTimerId >= 0) {
@@ -1020,6 +1277,8 @@ export struct NativeContentDocument {
     Stack({ alignContent: Alignment.TopEnd }) {
       List({ space: this.blockSpacing(), scroller: this.scroller }) {
           ListItem() { this.documentHeader() }
+            // List.space 已含段间距，仅补足信息头与正文之间的留白；大段间距偏好不被压缩。
+            .padding({ bottom: this.readingLayout ? Math.max(0, 24 - this.blockSpacing()) : 0 })
             .onAreaChange((_oldArea: Area, newArea: Area): void => {
               this.reportChromeHeight('header', newArea);
             })
@@ -1042,7 +1301,7 @@ export struct NativeContentDocument {
               .onAreaChange((_oldArea: Area, newArea: Area): void => {
                 this.reportBlockHeight(item.id, newArea);
               })
-            }, (item: ReaderBlock): string => item.id)
+            }, (item: ReaderBlock): string => `${item.id}:${this.renderRevision}`)
           }
           ListItem() { this.documentBodyFooter() }
             .onAreaChange((_oldArea: Area, newArea: Area): void => {
@@ -1073,12 +1332,12 @@ export struct NativeContentDocument {
         .height('100%')
         .scrollBar(BarState.Off)
         .padding({
-          left: $r('app.float.page_padding'),
-          right: $r('app.float.page_padding'),
+          left: this.readingLayout ? readerHorizontalPaddingVp(this.viewportWidthVp) : $r('app.float.page_padding'),
+          right: this.readingLayout ? readerHorizontalPaddingVp(this.viewportWidthVp) : $r('app.float.page_padding'),
           top: $r('app.float.spacing_medium')
         })
         // 末尾避让随正文滚动，避免底部 padding 压缩视口、在悬浮操作栏下方形成固定留白。
-        .contentEndOffset(100)
+        .contentEndOffset(this.bottomInsetVp)
         // 起始内缩随正文滚动（同 contentEndOffset 思路）：视口可延伸到悬浮顶栏之下，
         // 未滚动时正文仍从顶栏下方开始，滚动后正文从玻璃顶栏背后穿过。
         .contentStartOffset(this.topInsetVp)
@@ -1090,7 +1349,14 @@ export struct NativeContentDocument {
             this.viewportHeightVp = height;
             this.refreshContentHeightEstimate();
           }
+          this.schedulePositionRestore();
         })
+        .onScrollIndex((start: number, end: number): void => {
+          this.positionFirstIndex = start;
+          this.positionLastIndex = end;
+          this.schedulePositionSave();
+        })
+        .onScrollStop((): void => this.persistReaderPosition())
         // 触底回调：问题详情页据此加载回答信息流下一页。
         .onReachEnd((): void => {
           this.updateBottomEdge(true);
@@ -1118,6 +1384,7 @@ export struct NativeContentDocument {
           this.lastYOffset = yOffset;
           this.scrollYVp = yOffset;
           this.refreshContentHeightEstimate();
+          this.schedulePositionSave();
           const callback = this.onScrollOffset;
           if (callback !== undefined) {
             callback(yOffset);
@@ -1125,8 +1392,7 @@ export struct NativeContentDocument {
         })
 
       // 右缘可拖动阅读进度条：问题/回答/文章三页共用（上游 ArticleScreen 接入方式一致）。
-      // 上下留白与几何换算在组件内按上游 `ArticleScreen`（statusBars + 64 / systemBars + 96）
-      // 与 `VerticalReadingProgressBar`（拇指高度与行程都按"轨道高"）对齐，宿主无需传参。
+      // 上下留白由悬浮顶栏与实测底栏决定；拇指高度与行程均按轨道高度换算。
       // 直接作为 Stack 的右对齐子节点、宽仅 12vp：Stack 内重叠区域的触摸测试默认只命中
       // 最上层节点，进度条可见时右缘这 12vp 归它（拖动定位），其余区域照常命中正文列表；
       // 隐藏时进度条自身把 `hitTestBehavior` 切到 `HitTestMode.None`，右缘手势完整交回正文。
@@ -1137,6 +1403,8 @@ export struct NativeContentDocument {
         viewportHeightVp: this.viewportHeightVp,
         contentHeightVp: this.contentHeightVp,
         scrollYVp: this.scrollYVp,
+        topInsetVp: this.topInsetVp,
+        bottomInsetVp: Math.max(96, this.bottomInsetVp),
         onSeekStateChange: (dragging: boolean): void => {
           if (dragging) {
             // 拖动期间正文由 scrollTo 驱动：屏蔽贴边过滑，否则贴底向上拖滚动条
@@ -1184,6 +1452,18 @@ export struct NativeContentDocument {
     }
     .width('100%')
     .height('100%')
+    .onTouch((event: TouchEvent): void => {
+      if (event.type === TouchType.Down) { this.cancelPositionRestore(); }
+    })
+    .onAreaChange((_oldArea: Area, area: Area): void => {
+      const width = Number(area.width);
+      if (width > 0 && Math.abs(width - this.viewportWidthVp) > 0.5) {
+        this.viewportWidthVp = width;
+        this.exactContentHeightVp = 0;
+        this.refreshContentHeightEstimate();
+      }
+      this.schedulePositionRestore();
+    })
     .focusable(this.volumeKeyPageTurn)
     .defaultFocus(this.volumeKeyPageTurn)
     .onKeyPreIme((event: KeyEvent): boolean => {
@@ -1199,10 +1479,11 @@ export struct NativeContentDocument {
 
   /** 正文字号（fp，`Text.fontSize` 传 number 即 fp）：16 × 字号%，默认 16 == 改造前 16fp。 */
   private bodyFontSize(): number {
-    return readerBodyFontSize(this.fontSizePercent);
+    return readerBodyFontSize(this.fontSizePercent, this.typographyPreset);
   }
 
   private turnPage(direction: number): void {
+    this.cancelPositionRestore();
     const maxOffset = Math.max(0, this.contentHeightVp - this.viewportHeightVp);
     if (direction < 0 && this.scrollYVp <= 2) {
       const callback = this.onPageTurnPastStart;
@@ -1222,12 +1503,12 @@ export struct NativeContentDocument {
 
   /** 正文行高（fp）：行高 160% ↔ 改造前的 30，见 ReaderTypography 的归一说明。 */
   private bodyLineHeight(): number {
-    return readerBodyLineHeight(this.fontSizePercent, this.lineHeightPercent);
+    return readerBodyLineHeight(this.fontSizePercent, this.lineHeightPercent, this.typographyPreset);
   }
 
   /** 段间距/块间距（vp，`List({ space })` 传 number 即 vp）：12 × 段间距%，默认 12 == 改造前。 */
   private blockSpacing(): number {
-    return readerBlockSpacing(this.blockSpacingPercent);
+    return readerBlockSpacing(this.blockSpacingPercent, this.typographyPreset);
   }
 
   /** 标题字号（fp）：20 × 字号%，默认 20 == 改造前 heading_font_size。 */
@@ -1248,7 +1529,36 @@ export struct NativeContentDocument {
     this.measuredBlockHeightSumVp = 0;
     this.measuredBlockCount = 0;
     this.exactContentHeightVp = 0;
+    this.rebuildRenderedBlocks();
     this.refreshContentHeightEstimate();
+  }
+
+  private onAppearanceChanged(): void {
+    this.rebuildRenderedBlocks();
+  }
+
+  private rebuildRenderedBlocks(): void {
+    // 设置页覆盖着详情时，字号仍会广播到缓存的正文；保留隐藏前的锚点，禁止布局变化覆盖进度。
+    if (this.positionMounted && this.positionStore !== undefined && this.pendingPosition === undefined &&
+      this.positionWritable) {
+      if (this.positionIsActive()) {
+        try { this.positionSnapshot = this.captureReaderPosition() ?? this.positionSnapshot; } catch (_error) {}
+      }
+      const snapshot = this.positionSnapshot;
+      if (snapshot !== undefined) {
+        const index = readerPositionBlockIndex(snapshot, this.blocks);
+        if (snapshot.blockIndex === -1 || index >= 0) {
+          this.pendingPosition = snapshot;
+          this.positionTargetIndex = index + 1;
+          this.positionNeedsJump = true;
+          this.positionRestoreStarted = 0;
+          this.positionWritable = false;
+        }
+      }
+    }
+    this.renderRevision += 1;
+    this.dataSource.replace(this.blocks);
+    this.schedulePositionRestore(true);
   }
 
   /** 正文块渲染后回报实测高度（vp），用于估算未渲染块的高度。 */
@@ -1273,6 +1583,7 @@ export struct NativeContentDocument {
       this.measuredBlockHeightSumVp += height - previous;
     }
     this.refreshContentHeightEstimate();
+    this.schedulePositionRestore(true);
   }
 
   /** 正文块之外的固定槽位（页头/正文页脚/页脚）实测高度（vp）。 */
@@ -1287,6 +1598,7 @@ export struct NativeContentDocument {
     }
     this.chromeHeights.set(key, height);
     this.refreshContentHeightEstimate();
+    this.schedulePositionRestore(true);
   }
 
   private chromeHeightVp(): number {
@@ -1312,7 +1624,7 @@ export struct NativeContentDocument {
     const total = this.blocks.length;
     const average = this.measuredBlockCount > 0
       ? this.measuredBlockHeightSumVp / this.measuredBlockCount
-      : defaultEstimatedBlockHeightVp(this.blockSpacingPercent);
+      : defaultEstimatedBlockHeightVp(this.blockSpacingPercent, this.typographyPreset);
     const estimated = this.measuredBlockHeightSumVp
       + Math.max(0, total - this.measuredBlockCount) * average
       + this.chromeHeightVp();
@@ -1355,14 +1667,14 @@ export struct NativeContentDocument {
     .width('100%')
     .alignItems(HorizontalAlign.Start)
     .padding({
-      left: (item.quoteDepth ?? 0) > 0 ? 12 : 0,
-      // 知乎网页 h2 的实际段前间距为 42px；扣除列表已有间距，避免重复叠加。
-      top: item.kind === ReaderBlockKind.HEADING && item.text.trim() === '推荐阅读' ?
-        Math.max(0, 42 - this.blockSpacing()) : 0
+      left: (item.quoteDepth ?? 0) > 0 ? 12 : 0
     })
-    .margin({ left: Math.min(Math.max((item.quoteDepth ?? 0) - 1, 0), 4) * 8 })
-    .borderWidth({ left: (item.quoteDepth ?? 0) > 0 ? 3 : 0 })
-    .borderColor($r('app.color.secondary_text'))
+    .margin({
+      left: Math.min(Math.max((item.quoteDepth ?? 0) - 1, 0), 4) * 8,
+      top: readerBlockLeadingSpace(item, this.previousBlocks.get(item.id), this.blockSpacing())
+    })
+    .borderWidth({ left: (item.quoteDepth ?? 0) > 0 ? 2 : 0 })
+    .borderColor($r('app.color.reader_quote_border'))
   }
 
   @Builder
@@ -1486,6 +1798,9 @@ export struct NativeContentDocument {
     } else if (item.kind === ReaderBlockKind.IMAGE) {
       ReaderImageBlock({
         item: item,
+        captionSpacing: this.blockSpacing() * 0.5,
+        captionFontSize: this.bodyFontSize() * 0.8125,
+        captionLineHeight: readerCaptionLineHeightFp(this.bodyFontSize(), this.bodyLineHeight()),
         secondaryTextColor: $r('app.color.secondary_text'),
         onPreview: (url: string): void => {
           // 全屏查看器由详情页根 Stack 叠层渲染（AppStorage 广播）：正文组件处于列表

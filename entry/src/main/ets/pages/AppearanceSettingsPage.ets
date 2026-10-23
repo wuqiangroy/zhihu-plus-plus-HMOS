@@ -22,6 +22,7 @@ import {
   normalizeThemeColor,
   onThemeColor,
   ReaderTypography,
+  ReaderTypographyPreset,
   ShareActionMode
 } from 'data';
 import {
@@ -32,6 +33,7 @@ import {
   immersiveMaterialModeIndex,
   immersiveMaterialModeLabel
 } from '../common/style/ImmersiveMaterialStyles';
+import { display } from '@kit.ArkUI';
 import { getAbilityContext } from '../entryability/AbilityContextHolder';
 
 /**
@@ -69,6 +71,7 @@ export struct AppearanceSettingsPage {
   @StorageProp('contentFontSize') private contentFontSize: number = 100;
   @StorageProp('contentLineHeight') private contentLineHeight: number = 160;
   @StorageProp('contentBlockSpacing') private contentBlockSpacing: number = 100;
+  @StorageProp('contentTypographyPreset') private contentTypographyPreset: string = ReaderTypographyPreset.COMFORTABLE;
   @StorageProp('fabOpacity') private fabOpacity: number = 100;
   @StorageProp('showFeedThumbnail') private showFeedThumbnail: boolean = true;
   @StorageProp('showRefreshFab') private showRefreshFab: boolean = true;
@@ -147,6 +150,8 @@ export struct AppearanceSettingsPage {
 
         this.sectionTitle('阅读')
         Column() {
+          this.typographyPresetSetting()
+          Divider().color($r('app.color.divider_color'))
           this.fontSizeSetting()
           Divider().color($r('app.color.divider_color'))
           this.sliderSetting({
@@ -374,12 +379,33 @@ export struct AppearanceSettingsPage {
         .fontSize($r('app.float.secondary_font_size'))
         .fontColor($r('app.color.secondary_text'))
         .width('100%')
-      Row({ space: $r('app.float.spacing_small') }) {
-        this.themeModeButton('跟随系统', AppThemeMode.SYSTEM, 'appearance_theme_system')
-        this.themeModeButton('浅色', AppThemeMode.LIGHT, 'appearance_theme_light')
-        this.themeModeButton('深色', AppThemeMode.DARK, 'appearance_theme_dark')
+      if (this.themeModeOptionsStacked()) {
+        // 系统字号放大后“跟随系统”必然折行，横向三等分会高低不齐，改为纵向整行排列。
+        Column({ space: $r('app.float.spacing_xsmall') }) {
+          this.themeModeButton('跟随系统', AppThemeMode.SYSTEM, 'appearance_theme_system')
+          this.themeModeButton('浅色', AppThemeMode.LIGHT, 'appearance_theme_light')
+          this.themeModeButton('深色', AppThemeMode.DARK, 'appearance_theme_dark')
+        }
+        .width('100%')
+      } else {
+        Row({ space: $r('app.float.spacing_small') }) {
+          Column() {
+            this.themeModeButton('跟随系统', AppThemeMode.SYSTEM, 'appearance_theme_system')
+          }
+          .layoutWeight(1)
+
+          Column() {
+            this.themeModeButton('浅色', AppThemeMode.LIGHT, 'appearance_theme_light')
+          }
+          .layoutWeight(1)
+
+          Column() {
+            this.themeModeButton('深色', AppThemeMode.DARK, 'appearance_theme_dark')
+          }
+          .layoutWeight(1)
+        }
+        .width('100%')
       }
-      .width('100%')
     }
     .alignItems(HorizontalAlign.Start)
     .width('100%')
@@ -390,11 +416,26 @@ export struct AppearanceSettingsPage {
   private themeModeButton(label: string, mode: AppThemeMode, testId: string) {
     Button(label, { type: ButtonType.ROUNDED_RECTANGLE, stateEffect: true })
       .id(testId)
-      .layoutWeight(1)
+      .width('100%')
       .fontSize($r('app.float.secondary_font_size'))
       .fontColor(this.themeMode === mode ? onThemeColor(this.resolvedThemeColor) : $r('app.color.primary_text'))
       .backgroundColor(this.themeMode === mode ? this.resolvedThemeColor : $r('app.color.control_background'))
       .onClick((): void => this.onThemeModeChange(mode))
+  }
+
+  /**
+   * 主题模式按钮何时改为纵向排列：只有横向三等分放不下「跟随系统」时才需要。
+   * 该判断必须同时看字号与窗口宽度——平板横屏（1138vp）配大字号完全放得下，
+   * 只按 fontScale 一刀切会把平板也改成三行铺满整宽。
+   */
+  private themeModeOptionsStacked(): boolean {
+    const fontScale = getAbilityContext()?.config.fontSizeScale ?? 1;
+    const screen = display.getDefaultDisplaySync();
+    const windowWidthVp = screen.densityPixels > 0 ? screen.width / screen.densityPixels : 360;
+    // 卡片内容宽 = 窗口宽 - 页面左右 12vp*2 - 卡片左右 18vp*2 - 按钮间距 10vp*2
+    const buttonWidthVp = Math.max(0, (windowWidthVp - 80) / 3);
+    // 「跟随系统」四字 + 按钮左右内边距，标准字号下约 88vp
+    return fontScale * 88 > buttonWidthVp;
   }
 
   /** 主题颜色入口行：当前色圆点 + 名称 + hex，点击进入主题颜色配置页。 */
@@ -504,6 +545,20 @@ export struct AppearanceSettingsPage {
       return;
     }
     this.onImmersiveMaterialChange(modes[index]);
+  }
+
+  @Builder
+  private typographyPresetSetting() {
+    this.selectSetting('正文排版', '舒适排版的文字略大、行距更紧凑；字号、行高和段间距仍可单独调整',
+      this.contentTypographyPreset === ReaderTypographyPreset.COMFORTABLE ? '舒适排版' : '原有排版',
+      [{ value: '舒适排版' }, { value: '原有排版' }],
+      this.contentTypographyPreset === ReaderTypographyPreset.COMFORTABLE ? 0 : 1,
+      'appearance_typography_preset', (index: number): void => {
+        if (index === 0 || index === 1) {
+          this.updateTypography(this.contentFontSize, this.contentLineHeight, this.contentBlockSpacing,
+            index === 0 ? ReaderTypographyPreset.COMFORTABLE : ReaderTypographyPreset.CLASSIC);
+        }
+      })
   }
 
   @Builder
@@ -674,6 +729,7 @@ export struct AppearanceSettingsPage {
         .selected(selected)
         .value(value)
         .fontColor($r('app.color.primary_text'))
+        .selectedOptionFontColor(this.resolvedThemeColor)
         .constraintSize({ maxWidth: 160 })
         .onSelect((index: number): void => onSelect(index))
     }
@@ -1077,15 +1133,19 @@ export struct AppearanceSettingsPage {
     });
   }
 
-  private updateTypography(fontSize: number, lineHeight: number, blockSpacing: number): void {
+  private updateTypography(fontSize: number, lineHeight: number, blockSpacing: number,
+    preset?: ReaderTypographyPreset): void {
     const value: ReaderTypography = normalizeReaderTypography({
       fontSize: fontSize,
       lineHeight: lineHeight,
-      blockSpacing: blockSpacing
+      blockSpacing: blockSpacing,
+      preset: preset ?? (this.contentTypographyPreset === ReaderTypographyPreset.COMFORTABLE
+        ? ReaderTypographyPreset.COMFORTABLE : ReaderTypographyPreset.CLASSIC)
     });
     AppStorage.setOrCreate('contentFontSize', value.fontSize);
     AppStorage.setOrCreate('contentLineHeight', value.lineHeight);
     AppStorage.setOrCreate('contentBlockSpacing', value.blockSpacing);
+    AppStorage.setOrCreate('contentTypographyPreset', value.preset ?? ReaderTypographyPreset.COMFORTABLE);
     void this.store?.saveReaderTypography(value).catch((_error: Object): void => {
       this.statusMessage = '阅读设置保存失败，本次调整仍已生效';
     });

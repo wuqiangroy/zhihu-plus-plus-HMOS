@@ -4,9 +4,12 @@ import {
   FORMULA_MAX_RASTER_DIMENSION_PX,
   FORMULA_MIN_DECODE_PIXELS_PER_EX,
   blockFormulaDisplayAspectRatio,
+  boxedFormulaText,
+  boxedFormulaTextLayout,
   formulaDecodePixelsPerEx,
   formulaDisplaySize,
   formulaSvgExSize,
+  formulaSvgTextRuns,
   isMathJaxErrorSvg,
   isTrustedFormulaUrl,
   normalizeFormulaSvgText,
@@ -177,6 +180,71 @@ export default function readerDocumentTest(): void {
         '<svg width="0.84ex" height="2.009ex"><path stroke="currentColor" d="M26 385"></path></svg>')).assertFalse();
     });
 
+    it('mapsMathJaxChineseTextThroughFlippedGroupsAndViewBox', 0, () => {
+      const svg = '<svg viewBox="0 -100 400 200" style="font-size: 15px;">' +
+        '<g transform="matrix(1 0 0 -1 0 0)"><g transform="translate(20,0)">' +
+        '<text transform="scale(2) matrix(1 0 0 -1 0 0)">区</text>' +
+        '<g transform="translate(30,0)"><text transform="scale(2) matrix(1 0 0 -1 0 0)">' +
+        '域</text></g></g></g><line x1="0" x2="400"/></svg>';
+      const runs = formulaSvgTextRuns(svg, 800, 400);
+      expect(runs.length).assertEqual(2);
+      expect(runs[0].text).assertEqual('区');
+      expect(runs[1].text).assertEqual('域');
+      expect(runs[0].fontSize).assertEqual(15);
+      expect(runs[0].matrix[0]).assertEqual(4);
+      expect(runs[0].matrix[3]).assertEqual(4);
+      expect(runs[0].matrix[4]).assertEqual(40);
+      expect(runs[0].matrix[5]).assertEqual(200);
+      expect(runs[1].matrix[4]).assertEqual(100);
+    });
+
+    it('recognizesOnlyPureTextFormulaBoxes', 0, () => {
+      expect(boxedFormulaText('\\boxed{\\text{区域边界上的总效应。}}')).assertEqual('区域边界上的总效应。');
+      expect(boxedFormulaText(' \\boxed { \\text { 为什么内部的变化，最终可以由边界来描述？ } } '))
+        .assertEqual('为什么内部的变化，最终可以由边界来描述？');
+      expect(boxedFormulaText('\\boxed{x^2}')).assertUndefined();
+      expect(boxedFormulaText('\\boxed{\\text{面积} + x^2}')).assertUndefined();
+      expect(boxedFormulaText('\\boxed{\\text{$x$}}')).assertUndefined();
+      expect(boxedFormulaText('\\boxed{\\text{}}')).assertUndefined();
+    });
+
+    it('centersFormulaBoxTextWithoutShrinkingTheFont', 0, () => {
+      const shortBox = boxedFormulaTextLayout(56, 1144, 560, 78.4);
+      const wrappedBox = boxedFormulaTextLayout(56, 800, 700, 156.8);
+      expect(shortBox.fontSizePx).assertEqual(56);
+      expect(wrappedBox.fontSizePx).assertEqual(56);
+      expect(wrappedBox.height > shortBox.height).assertTrue();
+      expect(wrappedBox.width <= 800).assertTrue();
+      expect(shortBox.textX * 2 + shortBox.textWidth).assertEqual(shortBox.width);
+      expect(Math.abs(shortBox.textY * 2 + 78.4 - shortBox.height) < 0.001).assertTrue();
+      expect(Math.abs(wrappedBox.textY * 2 + 156.8 - wrappedBox.height) < 0.001).assertTrue();
+    });
+
+    it('decodesSvgTextEntitiesAndPreservesLetterboxedBaseline', 0, () => {
+      const runs = formulaSvgTextRuns('<svg viewBox="10 -20 100 100">' +
+        '<text x="12" y="5" font-size="18">&lt;&#x533A;&#22495;&amp;</text></svg>', 200, 100);
+      expect(runs[0].text).assertEqual('<区域&');
+      expect(runs[0].fontSize).assertEqual(18);
+      expect(runs[0].matrix[4]).assertEqual(52);
+      expect(runs[0].matrix[5]).assertEqual(25);
+    });
+
+    it('leavesPathOnlyFormulasAndUnusedTextDefinitionsAlone', 0, () => {
+      expect(formulaSvgTextRuns('<svg><path d="M0 0L1 1"/></svg>', 100, 100).length).assertEqual(0);
+      expect(formulaSvgTextRuns('<svg viewBox="0 0 100 100">' +
+        '<defs><text>不绘制</text></defs><path d="M0 0L1 1"/></svg>', 100, 100).length).assertEqual(0);
+    });
+
+    it('rejectsUnsupportedSvgTextLayoutInsteadOfReturningAnEmptyBox', 0, () => {
+      let rejected = false;
+      try {
+        formulaSvgTextRuns('<svg viewBox="0 0 100 100"><text><tspan>中文</tspan></text></svg>', 100, 100);
+      } catch (_error) {
+        rejected = true;
+      }
+      expect(rejected).assertTrue();
+    });
+
     it('clampsFormulaDecodePixelsPerExForSharpnessAndLimits', 0, () => {
       // 常规公式：目标密度（字号×0.5em/ex×屏幕密度）原样生效。
       expect(formulaDecodePixelsPerEx(6, 2, 29)).assertEqual(29);
@@ -270,6 +338,16 @@ export default function readerDocumentTest(): void {
       expect(blocks.length).assertEqual(1);
       expect(blocks[0].kind).assertEqual(ReaderBlockKind.IMAGE);
       expect(blocks[0].sourceUrl).assertEqual('https://pic1.zhimg.com/v2-abc123def');
+    });
+
+    it('prefersVisibleFigureCaptionOverImageAlt', 0, () => {
+      const blocks = parseZhihuHtml('<figure><img src="https://picx.zhimg.com/test.jpg" alt="图片加载替代文字">' +
+        '<figcaption><p>实际图注 <b>重点</b></p></figcaption></figure>');
+      expect(blocks.length).assertEqual(1);
+      expect(blocks[0].text).assertEqual('实际图注 重点');
+      const fallback = parseZhihuHtml('<figure><img src="https://picx.zhimg.com/test.jpg" alt="替代文字">' +
+        '<figcaption> </figcaption></figure>');
+      expect(fallback[0].text).assertEqual('替代文字');
     });
 
     it('parsesEmbeddedZhihuVideoCard', 0, () => {

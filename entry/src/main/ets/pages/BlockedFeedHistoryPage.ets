@@ -1,3 +1,4 @@
+import { CenteredOverlayDialog } from './CenteredOverlayDialog';
 import {
   onThemeColor,
   BlockedFeedHistoryGateway,
@@ -10,6 +11,7 @@ import {
   BlockedFeedHistoryViewState,
   blockedFeedHistoryItemLabel
 } from './BlockedFeedHistoryState';
+import { adaptiveOverlayWidth, isWideOverlayContainer, ADAPTIVE_OVERLAY_MENU_WIDTH_VP } from '../common/style/AdaptiveOverlayLayout';
 
 @Component
 export struct BlockedFeedHistoryPage {
@@ -21,10 +23,29 @@ export struct BlockedFeedHistoryPage {
     busy: false,
     message: '正在读取屏蔽记录'
   };
-  @State private confirmClear: boolean = false;
+  @State @Watch('clearDialogChanged') private confirmClear: boolean = false;
   @State private historyActionsSheetShown: boolean = false;
+  @State private overlayWidthVp: number = 0;
+  @StorageProp('statusBarHeight') private statusBarHeightVp: number = 0;
   @StorageProp('resolvedThemeColor') private resolvedThemeColor: string = DEFAULT_THEME_COLOR;
   private controller?: BlockedFeedHistoryController;
+
+  private clearDialog: CustomDialogController = new CustomDialogController({
+    builder: CenteredOverlayDialog({ content: (): void => { this.clearConfirmation(); } }),
+    alignment: DialogAlignment.Center,
+    autoCancel: true,
+    maskColor: '#99000000',
+    backgroundColor: $r('app.color.surface_background'),
+    cancel: (): void => { this.confirmClear = false; }
+  });
+
+  private clearDialogChanged(): void {
+    if (this.confirmClear) {
+      this.clearDialog.open();
+    } else {
+      this.clearDialog.close();
+    }
+  }
 
   aboutToAppear(): void {
     // P3-7：返回栈重显（页面实例与状态保留）时 aboutToAppear 可能再次触发；
@@ -117,36 +138,24 @@ export struct BlockedFeedHistoryPage {
         top: 94, bottom: $r('app.float.page_padding') })
       .backgroundColor($r('app.color.page_background'))
 
-      Column()
-        .bindSheet(this.historyActionsSheetShown, this.historyActionsSheet(), {
-          height: SheetSize.FIT_CONTENT,
-          dragBar: true,
-          showClose: false,
-          maskColor: '#66000000',
-          backgroundColor: $r('app.color.surface_background'),
-          onDisappear: (): void => {
-            if (this.historyActionsSheetShown) {
-              this.historyActionsSheetShown = false;
-            }
-          }
-        })
-      Column()
-        .bindSheet(this.confirmClear, this.clearConfirmation(), {
-          height: SheetSize.FIT_CONTENT,
-          dragBar: true,
-          showClose: false,
-          maskColor: '#66000000',
-          backgroundColor: $r('app.color.surface_background'),
-          onDisappear: (): void => {
-            if (this.confirmClear) {
-              this.confirmClear = false;
-            }
-          }
-        })
+      Column() {
+        this.pageHeader()
+      }
+      .width('100%')
+      .padding({ left: 12, right: 12, top: 8 })
+      .position({ x: 0, y: Math.max(this.statusBarHeightVp, 0) })
+      .zIndex(2)
+
     }
     .id('blocked_feed_history_page')
     .width('100%')
     .height('100%')
+    .onAreaChange((_oldArea: Area, newArea: Area): void => {
+      const width = Number(newArea.width);
+      if (width > 0) {
+        this.overlayWidthVp = width;
+      }
+    })
     .backgroundColor($r('app.color.page_background'))
   }
 
@@ -181,6 +190,21 @@ export struct BlockedFeedHistoryPage {
       .padding(0)
       .backgroundColor(Color.Transparent)
       .accessibilityText('屏蔽记录操作')
+      .bindSheet(this.historyActionsSheetShown, this.historyActionsSheet(), {
+        preferType: isWideOverlayContainer(this.overlayWidthVp) ? SheetType.POPUP : SheetType.BOTTOM,
+        width: isWideOverlayContainer(this.overlayWidthVp)
+          ? adaptiveOverlayWidth(this.overlayWidthVp, ADAPTIVE_OVERLAY_MENU_WIDTH_VP) : '100%',
+        height: SheetSize.FIT_CONTENT,
+        dragBar: !isWideOverlayContainer(this.overlayWidthVp),
+        showClose: false,
+        maskColor: '#99000000',
+        backgroundColor: $r('app.color.surface_background'),
+        onDisappear: (): void => {
+          if (this.historyActionsSheetShown) {
+            this.historyActionsSheetShown = false;
+          }
+        }
+      })
       .onClick((): void => {
         this.historyActionsSheetShown = true;
       })

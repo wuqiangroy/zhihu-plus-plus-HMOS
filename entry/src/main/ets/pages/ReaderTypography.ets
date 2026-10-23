@@ -14,6 +14,8 @@
  *   （旧值 `space: 12`）。
  *
  * 抽成独立模块便于单测（NativeContentDocument 与行内公式子组件共用同一套换算）。
+ * 应用默认使用舒适方案：100%/160%/100% 对应 17fp/29fp/14vp。
+ * 应用通过偏好显式传入方案；换算函数未传方案时仍保留原有换算，兼容已有调用。
  */
 
 /** 正文字号基线（fp）：改造前 `app.float.body_font_size` = 16fp。 */
@@ -27,17 +29,19 @@ export const LINE_HEIGHT_ANCHOR_PERCENT = 160;
 /** 改造前正文行高比：16fp 字号配 30 行高 = 1.875。 */
 export const BODY_LINE_HEIGHT_BASE_RATIO = 1.875;
 
-export function readerBodyFontSize(fontSizePercent: number): number {
-  return BODY_FONT_SIZE_BASE_FP * fontSizePercent / 100;
+export function readerBodyFontSize(fontSizePercent: number, preset: string = 'classic'): number {
+  return (preset === 'comfortable' ? 17 : BODY_FONT_SIZE_BASE_FP) * fontSizePercent / 100;
 }
 
-export function readerBodyLineHeight(fontSizePercent: number, lineHeightPercent: number): number {
-  return readerBodyFontSize(fontSizePercent) * BODY_LINE_HEIGHT_BASE_RATIO *
+export function readerBodyLineHeight(fontSizePercent: number, lineHeightPercent: number,
+  preset: string = 'classic'): number {
+  const baseline = preset === 'comfortable' ? 29 : BODY_FONT_SIZE_BASE_FP * BODY_LINE_HEIGHT_BASE_RATIO;
+  return baseline * fontSizePercent / 100 *
     (lineHeightPercent / LINE_HEIGHT_ANCHOR_PERCENT);
 }
 
-export function readerBlockSpacing(blockSpacingPercent: number): number {
-  return BLOCK_SPACING_BASE_VP * blockSpacingPercent / 100;
+export function readerBlockSpacing(blockSpacingPercent: number, preset: string = 'classic'): number {
+  return (preset === 'comfortable' ? 14 : BLOCK_SPACING_BASE_VP) * blockSpacingPercent / 100;
 }
 
 export function readerHeadingFontSize(fontSizePercent: number): number {

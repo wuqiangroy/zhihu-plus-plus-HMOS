@@ -1,3 +1,4 @@
+import { CenteredOverlayDialog } from './CenteredOverlayDialog';
 import { pasteboard, BusinessError } from '@kit.BasicServicesKit';
 import {
   BlockedKeywordRule,
@@ -18,6 +19,7 @@ import {
   BlockingRulesPhase,
   BlockingRulesViewState
 } from './BlockingRulesState';
+import { adaptiveOverlayWidth, isWideOverlayContainer, ADAPTIVE_OVERLAY_MENU_WIDTH_VP } from '../common/style/AdaptiveOverlayLayout';
 
 @Component
 export struct BlockingRulesPage {
@@ -39,7 +41,7 @@ export struct BlockingRulesPage {
   @State private regex: boolean = false;
   @State private identifierInput: string = '';
   @State private nameInput: string = '';
-  @State private confirmClear: boolean = false;
+  @State @Watch('clearDialogChanged') private confirmClear: boolean = false;
   @State private actionsSheetShown: boolean = false;
   @State private addRuleSheetShown: boolean = false;
   @State private backupSheetShown: boolean = false;
@@ -47,8 +49,27 @@ export struct BlockingRulesPage {
   @State private backupInput: string = '';
   @State private exportedText: string = '';
   @State private backupStatus: string = '';
+  @State private overlayWidthVp: number = 0;
+  @StorageProp('statusBarHeight') private statusBarHeightVp: number = 0;
   @StorageProp('resolvedThemeColor') private resolvedThemeColor: string = DEFAULT_THEME_COLOR;
   private controller?: BlockingRulesController;
+
+  private clearDialog: CustomDialogController = new CustomDialogController({
+    builder: CenteredOverlayDialog({ content: (): void => { this.clearConfirmation(); } }),
+    alignment: DialogAlignment.Center,
+    autoCancel: true,
+    maskColor: '#99000000',
+    backgroundColor: $r('app.color.surface_background'),
+    cancel: (): void => { this.confirmClear = false; }
+  });
+
+  private clearDialogChanged(): void {
+    if (this.confirmClear) {
+      this.clearDialog.open();
+    } else {
+      this.clearDialog.close();
+    }
+  }
 
   aboutToAppear(): void {
     const rules = this.rules;
@@ -138,23 +159,19 @@ export struct BlockingRulesPage {
           this.addRuleSheetShown = true;
         })
 
-      Column()
-        .bindSheet(this.actionsSheetShown, this.actionsSheet(), {
-          height: SheetSize.FIT_CONTENT,
-          dragBar: true,
-          showClose: false,
-          maskColor: '#66000000',
-          backgroundColor: $r('app.color.surface_background'),
-          onDisappear: (): void => {
-            if (this.actionsSheetShown) {
-              this.actionsSheetShown = false;
-            }
-          }
-        })
+      Column() {
+        this.pageHeader()
+      }
+      .width('100%')
+      .padding({ left: 12, right: 12, top: 8 })
+      .position({ x: 0, y: Math.max(this.statusBarHeightVp, 0) })
+      .zIndex(2)
+
       Column()
         .bindSheet(this.addRuleSheetShown, this.addRuleSheet(), {
+          preferType: SheetType.CENTER,
           height: SheetSize.LARGE,
-          dragBar: true,
+          dragBar: false,
           showClose: false,
           maskColor: '#66000000',
           backgroundColor: $r('app.color.surface_background'),
@@ -166,8 +183,9 @@ export struct BlockingRulesPage {
         })
       Column()
         .bindSheet(this.backupSheetShown, this.backupSheet(), {
+          preferType: SheetType.CENTER,
           height: SheetSize.LARGE,
-          dragBar: true,
+          dragBar: false,
           showClose: false,
           maskColor: '#66000000',
           backgroundColor: $r('app.color.surface_background'),
@@ -178,22 +196,10 @@ export struct BlockingRulesPage {
           }
         })
       Column()
-        .bindSheet(this.confirmClear, this.clearConfirmation(), {
-          height: SheetSize.FIT_CONTENT,
-          dragBar: true,
-          showClose: false,
-          maskColor: '#66000000',
-          backgroundColor: $r('app.color.surface_background'),
-          onDisappear: (): void => {
-            if (this.confirmClear) {
-              this.confirmClear = false;
-            }
-          }
-        })
-      Column()
         .bindSheet(this.exportSheetShown, this.exportDialog(), {
+          preferType: SheetType.CENTER,
           height: SheetSize.LARGE,
-          dragBar: true,
+          dragBar: false,
           showClose: false,
           maskColor: '#66000000',
           backgroundColor: $r('app.color.surface_background'),
@@ -207,6 +213,12 @@ export struct BlockingRulesPage {
     .id('blocking_rules_page')
     .width('100%')
     .height('100%')
+    .onAreaChange((_oldArea: Area, newArea: Area): void => {
+      const width = Number(newArea.width);
+      if (width > 0) {
+        this.overlayWidthVp = width;
+      }
+    })
     .backgroundColor($r('app.color.page_background'))
   }
 
@@ -241,6 +253,21 @@ export struct BlockingRulesPage {
         .padding(0)
         .backgroundColor(Color.Transparent)
         .accessibilityText('内容屏蔽操作')
+        .bindSheet(this.actionsSheetShown, this.actionsSheet(), {
+          preferType: isWideOverlayContainer(this.overlayWidthVp) ? SheetType.POPUP : SheetType.BOTTOM,
+          width: isWideOverlayContainer(this.overlayWidthVp)
+            ? adaptiveOverlayWidth(this.overlayWidthVp, ADAPTIVE_OVERLAY_MENU_WIDTH_VP) : '100%',
+          height: SheetSize.FIT_CONTENT,
+          dragBar: !isWideOverlayContainer(this.overlayWidthVp),
+          showClose: false,
+          maskColor: '#99000000',
+          backgroundColor: $r('app.color.surface_background'),
+          onDisappear: (): void => {
+            if (this.actionsSheetShown) {
+              this.actionsSheetShown = false;
+            }
+          }
+        })
         .onClick((): void => {
           this.actionsSheetShown = true;
         })
