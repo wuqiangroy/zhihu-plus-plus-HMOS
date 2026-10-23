@@ -1,8 +1,15 @@
 import { describe, expect, it } from '@ohos/hypium';
-import { buildFeedFlowLayout, feedFlowItemIndex } from '../main/ets/pages/FeedWaterfallLayout';
+import { buildFeedFlowLayout, feedFlowItemIndex, homeFeedInitialItemTarget } from '../main/ets/pages/FeedWaterfallLayout';
 
 export default function feedWaterfallLayoutTest(): void {
   describe('feedWaterfallLayoutTest', () => {
+    it('sizesTheInitialBatchForWideViewportWithTwoBufferRows', 0, () => {
+      expect(homeFeedInitialItemTarget(599, 1022, 94)).assertEqual(1);
+      expect(homeFeedInitialItemTarget(600, 1022, 94)).assertEqual(22);
+      expect(homeFeedInitialItemTarget(1138, 711, 94)).assertEqual(16);
+      expect(homeFeedInitialItemTarget(1138, 0, 94)).assertEqual(1);
+      expect(homeFeedInitialItemTarget(1138, 10000, 94)).assertEqual(60);
+    });
     it('keepsOddContentAsIndependentItemsBetweenFullWidthChrome', 0, () => {
       const layout = buildFeedFlowLayout(['a', 'b', 'c'], [], 2, 2, true, 14, 94);
       expect(layout.entries.length).assertEqual(3);

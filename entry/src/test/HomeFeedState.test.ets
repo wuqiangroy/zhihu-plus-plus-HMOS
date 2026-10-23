@@ -3,6 +3,7 @@ import { FeedItem, FeedPage, FeedRepository, FeedTargetKind, HttpFailure, HttpFa
 import {
   HomeFeedController,
   HomeFeedPhase,
+  HomeFeedViewState,
   mergeUniqueFeedItems
 } from '../main/ets/pages/HomeFeedState';
 import { homeFeedActionLabel, homeFeedDestination, homeFeedDetailsLabel, homeFeedFooterLabel } from '../main/ets/pages/HomeFeedPage';
@@ -89,6 +90,128 @@ class MissingSessionHomeFeedRepository implements FeedRepository {
 
 export default function homeFeedStateTest(): void {
   describe('homeFeedStateTest', () => {
+    it('fillsTheInitialViewportBeforePublishingReady', 0, async () => {
+      const repository = new ControlledFeedRepository();
+      const states: Array<HomeFeedPhase> = [];
+      const controller = new HomeFeedController(repository, (state: HomeFeedViewState): void => {
+        states.push(state.phase);
+      });
+      controller.activate();
+      const loading = controller.loadInitial();
+      // 窗口测量通常发生在首个网络请求期间。
+      controller.setInitialItemTarget(3);
+      repository.succeed(0, page([feed('a')], 'next'));
+      await flushRemoteFilter();
+      expect(repository.cursors.length).assertEqual(2);
+      expect(controller.snapshot().phase).assertEqual(HomeFeedPhase.INITIAL_LOADING);
+      expect(controller.snapshot().items.length).assertEqual(0);
+      expect(states.includes(HomeFeedPhase.READY)).assertFalse();
+      repository.succeed(1, page([feed('a'), feed('b'), feed('c')], 'after'));
+      await loading;
+      expect(controller.snapshot().items.length).assertEqual(3);
+      expect(controller.snapshot().phase).assertEqual(HomeFeedPhase.READY);
+      expect(controller.snapshot().loadingMore).assertFalse();
+    });
+
+    it('continuesPastFilteredEmptyPagesAndStopsAtTheEnd', 0, async () => {
+      const repository = new ControlledFeedRepository();
+      const controller = new HomeFeedController(repository);
+      controller.setInitialItemTarget(12);
+      controller.activate();
+      const loading = controller.loadInitial();
+      repository.succeed(0, page([], 'next'));
+      await flushRemoteFilter();
+      repository.succeed(1, page([feed('a')], undefined, true));
+      await loading;
+      expect(controller.snapshot().items.length).assertEqual(1);
+      expect(controller.snapshot().canLoadMore).assertFalse();
+      expect(repository.cursors.length).assertEqual(2);
+    });
+
+    it('keepsSuccessfulInitialItemsWhenAnExtraPageFailsAndRetriesThatCursor', 0, async () => {
+      const repository = new ControlledFeedRepository();
+      const controller = new HomeFeedController(repository);
+      controller.setInitialItemTarget(3);
+      controller.activate();
+      const loading = controller.loadInitial();
+      repository.succeed(0, page([feed('a')], 'next'));
+      await flushRemoteFilter();
+      repository.fail(1);
+      await loading;
+      expect(controller.snapshot().phase).assertEqual(HomeFeedPhase.READY);
+      expect(controller.snapshot().items[0].id).assertEqual('a');
+      expect(controller.snapshot().errorMessage !== undefined).assertTrue();
+      expect(controller.snapshot().canLoadMore).assertFalse();
+      const retry = controller.retry();
+      expect(repository.cursors[2]).assertEqual('next');
+      repository.succeed(2, page([feed('b')], undefined, true));
+      await retry;
+      expect(controller.snapshot().items.length).assertEqual(2);
+    });
+
+    it('discardsTheEntireInitialBatchIfThePageBecomesInactive', 0, async () => {
+      const repository = new ControlledFeedRepository();
+      const controller = new HomeFeedController(repository);
+      controller.setInitialItemTarget(3);
+      controller.activate();
+      const loading = controller.loadInitial();
+      repository.succeed(0, page([feed('a')], 'next'));
+      await flushRemoteFilter();
+      controller.deactivate();
+      repository.succeed(1, page([feed('b'), feed('c')], 'after'));
+      await loading;
+      expect(controller.snapshot().items.length).assertEqual(0);
+    });
+
+    it('boundsInitialRequestsEvenWhenEveryPageIsFilteredOut', 0, async () => {
+      const repository = new ControlledFeedRepository();
+      const controller = new HomeFeedController(repository);
+      controller.setInitialItemTarget(12);
+      controller.activate();
+      const loading = controller.loadInitial();
+      for (let index = 0; index < 4; index += 1) {
+        repository.succeed(index, page([], `next-${index}`));
+        await flushRemoteFilter();
+      }
+      await loading;
+      expect(repository.cursors.length).assertEqual(4);
+      expect(controller.snapshot().phase).assertEqual(HomeFeedPhase.EMPTY);
+    });
+
+    it('stopsInitialPrefetchOnARepeatedCursor', 0, async () => {
+      const repository = new ControlledFeedRepository();
+      const controller = new HomeFeedController(repository);
+      controller.setInitialItemTarget(12);
+      controller.activate();
+      const loading = controller.loadInitial();
+      repository.succeed(0, page([feed('a')], 'same'));
+      await flushRemoteFilter();
+      repository.succeed(1, page([feed('b')], 'same'));
+      await loading;
+      expect(repository.cursors.length).assertEqual(2);
+      expect(controller.snapshot().items.length).assertEqual(2);
+    });
+
+    it('keepsTheOldFeedVisibleUntilTheRefreshBatchIsReady', 0, async () => {
+      const repository = new ControlledFeedRepository();
+      const controller = new HomeFeedController(repository);
+      controller.activate();
+      const initial = controller.loadInitial();
+      repository.succeed(0, page([feed('old')], 'old-next'));
+      await initial;
+      controller.setInitialItemTarget(3);
+      const refresh = controller.refresh();
+      repository.succeed(1, page([feed('new-a')], 'new-next'));
+      await flushRemoteFilter();
+      expect(controller.snapshot().items[0].id).assertEqual('old');
+      expect(controller.snapshot().refreshing).assertTrue();
+      repository.succeed(2, page([feed('new-b'), feed('new-c')], undefined, true));
+      await refresh;
+      expect(controller.snapshot().items.length).assertEqual(3);
+      expect(controller.snapshot().items[0].id).assertEqual('new-a');
+      expect(controller.snapshot().refreshing).assertFalse();
+    });
+
     it('filtersLateRemoteReadsOnlyBeyondTheBrowsedPrefixWithoutReloadingRecommendations', 0, async () => {
       const repository = new RemoteReadFeedRepository();
       const controller = new HomeFeedController(repository);

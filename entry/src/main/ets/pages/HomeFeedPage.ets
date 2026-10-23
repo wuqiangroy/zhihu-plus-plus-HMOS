@@ -1,4 +1,4 @@
-import { buildFeedFlowLayout, FeedFlowEntry, FeedFlowLayout, feedFlowItemIndex, FEED_TWO_COLUMN_MIN_WIDTH } from './FeedWaterfallLayout';
+import { buildFeedFlowLayout, FeedFlowEntry, FeedFlowLayout, feedFlowItemIndex, FEED_TWO_COLUMN_MIN_WIDTH, homeFeedInitialItemTarget } from './FeedWaterfallLayout';
 import { AppDestination, AppDestinationName } from 'core';
 import {
   onThemeColor,
@@ -96,6 +96,7 @@ export struct HomeFeedPage {
   @State private flowSections: WaterFlowSections = new WaterFlowSections();
   @State private flowLayout: FeedFlowLayout = buildFeedFlowLayout([], [], 1, 0, false, 0, FLOATING_TITLE_BAR_OFFSET);
   private firstVisibleIndex: number = 0;
+  private feedHeightVp: number = 0;
 
   aboutToAppear(): void {
     // 覆盖式顶栏：Refresh 头部从页面顶端展开，把刷新圆圈绘制偏移到悬浮标题栏下沿
@@ -115,6 +116,7 @@ export struct HomeFeedPage {
     this.controller = new HomeFeedController(repository, (state: HomeFeedViewState): void => {
       this.applyState(state);
     });
+    this.updateInitialItemTarget();
     this.controller.activate();
     this.controller.loadInitial();
     this.createBlockingAction();
@@ -289,6 +291,8 @@ export struct HomeFeedPage {
         if (width > 0 && Math.abs(width - this.feedWidthVp) > 0.5) {
           this.feedWidthVp = width;
         }
+        this.feedHeightVp = Number(area.height);
+        this.updateInitialItemTarget();
       })
 
       if (this.showRefreshFab && this.phase === HomeFeedPhase.READY) {
@@ -754,6 +758,11 @@ export struct HomeFeedPage {
 
   private usesCardSurface(): boolean {
     return this.feedWidthVp >= FEED_TWO_COLUMN_MIN_WIDTH || this.feedCardStyle === 'card';
+  }
+
+  private updateInitialItemTarget(): void {
+    this.controller?.setInitialItemTarget(
+      homeFeedInitialItemTarget(this.feedWidthVp, this.feedHeightVp, FLOATING_TITLE_BAR_OFFSET));
   }
 
   private rebuildFlowLayout(): void {

@@ -1,6 +1,15 @@
 /** Shared feed breakpoint in vp, measured on the actual page container. */
 export const FEED_TWO_COLUMN_MIN_WIDTH: number = 600;
 
+/** 按较短卡片估算双列首屏容量，并预留两行供首次滑动使用。 */
+export function homeFeedInitialItemTarget(width: number, height: number, topOffset: number): number {
+  if (width < FEED_TWO_COLUMN_MIN_WIDTH || height <= 0) {
+    return 1;
+  }
+  const rows: number = Math.ceil(Math.max(0, height - topOffset) / 112) + 2;
+  return Math.min(60, Math.max(12, rows * 2));
+}
+
 export interface FeedFlowEntry {
   key: string;
   itemIndex: number;
