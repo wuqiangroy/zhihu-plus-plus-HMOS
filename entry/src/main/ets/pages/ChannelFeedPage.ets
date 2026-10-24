@@ -45,6 +45,8 @@ import { dailyStoryDetailErrorMessage } from './DailyStoryDetailState';
 import { dailyFeedDateAtIndex, formatDailyDate } from './DailyFeedDates';
 import { DraggableRefreshButton } from './components/DraggableRefreshButton';
 import { topLevelScrollRegistry } from './TopLevelScrollRegistry';
+import { getAbilityContext } from '../entryability/AbilityContextHolder';
+import { Want } from '@kit.AbilityKit';
 
 @Component
 export struct ChannelFeedPage {
@@ -99,6 +101,8 @@ export struct ChannelFeedPage {
   @State private blockingBusy: boolean = false;
   @State private dailyStoryOpening: boolean = false;
   @State private dailyStoryOpenError: string = '';
+  /** 无法原生阅读时的日报原文地址：有值时错误弹窗提供“用浏览器打开”。 */
+  @State private dailyStoryOpenUrl: string = '';
   private controller?: ChannelFeedController;
   private blockingAction?: BlockingActionController;
   private pendingBlockItem?: ChannelContentItem = undefined;
@@ -386,22 +390,26 @@ export struct ChannelFeedPage {
         })
       }
 
-      // 打开日报正文时的全屏进度遮罩（无中间跳转页，给触达反馈）。
+      // 打开日报正文时的加载提示：只显示刷新圆圈，不压暗整页（避免点击瞬间整屏发黑）。
       if (this.dailyStoryOpening) {
-        Column({ space: 12 }) {
-          LoadingProgress()
-            .width(40)
-            .height(40)
-            .color(this.resolvedThemeColor)
-          Text('正在打开日报原文…')
-            .id(`channel_${this.source}_daily_opening`)
-            .fontSize($r('app.float.body_font_size'))
-            .fontColor($r('app.color.primary_text'))
+        Column() {
+          Column({ space: $r('app.float.spacing_small') }) {
+            LoadingProgress()
+              .width(32)
+              .height(32)
+              .color(this.resolvedThemeColor)
+            Text('正在打开日报原文…')
+              .id(`channel_${this.source}_daily_opening`)
+              .fontSize($r('app.float.secondary_font_size'))
+              .fontColor($r('app.color.secondary_text'))
+          }
+          .padding($r('app.float.card_padding'))
+          .borderRadius($r('app.float.card_radius'))
+          .backgroundColor($r('app.color.surface_background'))
         }
         .width('100%')
         .height('100%')
         .justifyContent(FlexAlign.Center)
-        .backgroundColor('#66000000')
       }
 
       // 打开失败提示。
@@ -415,14 +423,33 @@ export struct ChannelFeedPage {
               .fontSize($r('app.float.secondary_font_size'))
               .fontColor($r('app.color.secondary_text'))
               .textAlign(TextAlign.Center)
-            Button('确定')
-              .backgroundColor(this.resolvedThemeColor)
-              .fontColor(onThemeColor(this.resolvedThemeColor))
-              .id(`channel_${this.source}_daily_open_error_ok`)
-              .width('100%')
-              .onClick((): void => {
-                this.dailyStoryOpenError = '';
-              })
+            if (this.dailyStoryOpenUrl.length > 0) {
+              Button('用浏览器打开')
+                .backgroundColor(this.resolvedThemeColor)
+                .fontColor(onThemeColor(this.resolvedThemeColor))
+                .id(`channel_${this.source}_daily_open_browser`)
+                .width('100%')
+                .onClick((): void => {
+                  this.openDailyStoryInBrowser();
+                })
+              Button('取消')
+                .backgroundColor($r('app.color.surface_background'))
+                .fontColor($r('app.color.primary_text'))
+                .id(`channel_${this.source}_daily_open_cancel`)
+                .width('100%')
+                .onClick((): void => {
+                  this.dismissDailyStoryOpenError();
+                })
+            } else {
+              Button('确定')
+                .backgroundColor(this.resolvedThemeColor)
+                .fontColor(onThemeColor(this.resolvedThemeColor))
+                .id(`channel_${this.source}_daily_open_error_ok`)
+                .width('100%')
+                .onClick((): void => {
+                  this.dismissDailyStoryOpenError();
+                })
+            }
           }
           .width('80%')
           .padding($r('app.float.card_padding'))
@@ -607,15 +634,17 @@ export struct ChannelFeedPage {
     })
     .accessibilityText(`知乎日报：${item.story.title}`)
     .onClick((): void => {
-      this.openDailyStory(item.story.id);
+      this.openDailyStory(item.story.id, item.story.url);
     })
   }
 
   /**
    * 直接打开日报正文：先取目标（问题/回答/文章）再一步导航，避免经过
    * DailyStoryDetailPage 中间跳转页（用户看到“多了一个页面”）。
+   * 知乎部分日报（如「瞎扯」合集）的 originUrl 是 question/None/answer/None，
+   * 没有单一原生正文可跳，此时改为提供浏览器打开原文。
    */
-  private async openDailyStory(storyId: string): Promise<void> {
+  private async openDailyStory(storyId: string, storyUrl: string): Promise<void> {
     const repository = this.dailyStoryRepository;
     if (repository === undefined) {
       this.navigate({ name: AppDestinationName.DAILY_STORY, id: storyId });
@@ -626,18 +655,41 @@ export struct ChannelFeedPage {
     }
     this.dailyStoryOpening = true;
     this.dailyStoryOpenError = '';
+    this.dailyStoryOpenUrl = '';
+    let unsupportedUrl: string = '';
     try {
       const destination: AppDestination | undefined = await repository.getDestination(storyId);
       if (destination !== undefined) {
         this.navigate(destination);
       } else {
-        this.dailyStoryOpenError = '该日报暂不支持原生阅读';
+        unsupportedUrl = storyUrl.length > 0 ? storyUrl : `https://daily.zhihu.com/story/${storyId}`;
+        this.dailyStoryOpenError = '该日报暂不支持原生阅读，可在浏览器中查看原文';
       }
     } catch (error) {
       this.dailyStoryOpenError = dailyStoryDetailErrorMessage(error);
     } finally {
       this.dailyStoryOpening = false;
+      this.dailyStoryOpenUrl = unsupportedUrl;
     }
+  }
+
+  private dismissDailyStoryOpenError(): void {
+    this.dailyStoryOpenError = '';
+    this.dailyStoryOpenUrl = '';
+  }
+
+  /** 用系统浏览器打开日报原文（对齐上游「由于知乎的 Bug，无法找到原文」的兜底）。 */
+  private openDailyStoryInBrowser(): void {
+    const url = this.dailyStoryOpenUrl;
+    const context = getAbilityContext();
+    this.dismissDailyStoryOpenError();
+    if (context === undefined || url.length === 0) {
+      return;
+    }
+    const want: Want = { action: 'ohos.want.action.viewData', uri: url };
+    context.startAbility(want).catch((_error: Error): void => {
+      this.getUIContext().getPromptAction().showToast({ message: '暂时无法打开浏览器' });
+    });
   }
 
   private contentBlockMenu(item: ChannelContentItem): Array<MenuElement> {
