@@ -75,6 +75,12 @@ export class HomeFeedController {
   private visibleRangeKnown: boolean = false;
   private remoteFilterPending: boolean = false;
   private remoteFilterRunning: boolean = false;
+  private initialItemTarget: number = 1;
+
+  /** 首次加载和刷新在发布 READY 前补足首屏，窗口测量可在首个请求期间更新目标。 */
+  setInitialItemTarget(count: number): void {
+    this.initialItemTarget = Math.min(60, Math.max(1, Math.ceil(count)));
+  }
 
   constructor(repository: FeedRepository, observer: HomeFeedStateObserver = (_state: HomeFeedViewState): void => {
   }) {
@@ -258,18 +264,47 @@ export class HomeFeedController {
     }
     this.emit();
     try {
-      const page = await this.repository.loadHomePage();
+      let page = await this.repository.loadHomePage();
       if (!this.isCurrent(generation)) {
         return;
       }
-      this.items = mergeUniqueFeedItems([], page.items);
+      let initialItems: Array<FeedItem> = mergeUniqueFeedItems([], page.items);
+      const requestedCursors: Set<string> = new Set<string>();
+      // 过滤后每页可能只剩少量内容；限制额外请求数，并防止重复游标造成循环。
+      for (let extraPage: number = 0;
+        extraPage < 3 && this.initialItemTarget > 1 && initialItems.length < this.initialItemTarget;
+        extraPage += 1) {
+        const cursor: string | undefined = page.cursor.next;
+        if (page.cursor.isEnd || cursor === undefined || cursor.length === 0 || requestedCursors.has(cursor)) {
+          break;
+        }
+        requestedCursors.add(cursor);
+        try {
+          const nextPage = await this.repository.loadHomePage(cursor);
+          if (!this.isCurrent(generation)) {
+            return;
+          }
+          initialItems = mergeUniqueFeedItems(initialItems, nextPage.items);
+          page = nextPage;
+        } catch (error) {
+          if (!this.isCurrent(generation)) {
+            return;
+          }
+          // 补页失败不丢弃成功的首批；保留该游标供错误横幅手动重试。
+          this.errorMessage = homeFeedErrorMessage(error);
+          this.requiresLogin = homeFeedRequiresLogin(error);
+          this.retryLoadMore = true;
+          this.paginationRetryRequired = true;
+          break;
+        }
+      }
+      this.items = initialItems;
       this.browsed.clear();
       this.visibleRangeKnown = false;
       this.remoteFilterPending = true;
       this.applyCursor(page);
       this.phase = this.items.length > 0 ? HomeFeedPhase.READY : HomeFeedPhase.EMPTY;
-      this.retryLoadMore = this.items.length === 0 && this.hasNextPage();
-      this.paginationRetryRequired = false;
+      this.retryLoadMore = this.retryLoadMore || (this.items.length === 0 && this.hasNextPage());
     } catch (error) {
       if (!this.isCurrent(generation)) {
         return;

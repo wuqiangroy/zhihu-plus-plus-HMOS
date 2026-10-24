@@ -1,3 +1,4 @@
+import { buildFeedFlowLayout, FeedFlowEntry, FeedFlowLayout, feedFlowItemIndex, FEED_TWO_COLUMN_MIN_WIDTH, homeFeedInitialItemTarget } from './FeedWaterfallLayout';
 import { AppDestination, AppDestinationName } from 'core';
 import {
   onThemeColor,
@@ -26,11 +27,13 @@ import {
 import {
   AppPageStatusKind,
   AppPageStatusPanel,
+  FeedLoadMoreIndicator,
   FeedPullDownIndicatorHost,
-  FLOATING_TITLE_BAR_OFFSET
+  floatingTitleBarOffset
 } from './AppPageChrome';
 import { HomeFeedController, HomeFeedPhase, HomeFeedViewState } from './HomeFeedState';
 import { HomeFeedMenuAction, HomeFeedMenuItem, homeFeedMenuItems, resolveHomeFeedBlockUser, resolveHomeFeedTopics } from './HomeFeedMenuState';
+import { HOME_FEED_SCROLL_KEY, topLevelScrollRegistry } from './TopLevelScrollRegistry';
 import { DraggableRefreshButton } from './components/DraggableRefreshButton';
 
 @Component
@@ -55,23 +58,23 @@ export struct HomeFeedPage {
   @StorageProp('tabScrollTopTabIndex') private tabScrollTopTabIndex: number = -1;
   @StorageProp('showFeedThumbnail') private showFeedThumbnail: boolean = true;
   @StorageProp('showRefreshFab') private showRefreshFab: boolean = true;
-  @StorageProp('feedCardStyle') private feedCardStyle: string = 'divider';
+  @StorageProp('feedCardStyle') @Watch('rebuildFlowLayout') private feedCardStyle: string = 'divider';
   @StorageProp('fabOpacity') private fabOpacity: number = 100;
   @StorageProp('resolvedThemeColor') private resolvedThemeColor: string = DEFAULT_THEME_COLOR;
   // 首页更新卡片（对齐上游 HomeScreen 顶部 AnnouncementCard）：AppShell 启动检查到新版本后经
   // AppStorage 广播（HdsTabs 树下跨页面信号唯一可靠通道）。“以后”仅本次会话内忽略，对齐上游。
-  @StorageProp('homeUpdateAnnouncementVersion') private pendingUpdateVersion: string = '';
-  @State private dismissedUpdateVersion: string = '';
+  @StorageProp('homeUpdateAnnouncementVersion') @Watch('rebuildFlowLayout') private pendingUpdateVersion: string = '';
+  @State @Watch('rebuildFlowLayout') private dismissedUpdateVersion: string = '';
   // 下拉刷新自定义加载圆圈（refreshingContent 需 ComponentContent，随页面销毁释放）
   private indicator?: FeedPullDownIndicatorHost = undefined;
   navigate: (destination: AppDestination) => void = (_destination: AppDestination): void => {
   };
   @State private phase: HomeFeedPhase = HomeFeedPhase.IDLE;
-  @State private items: Array<FeedItem> = [];
+  @State @Watch('rebuildFlowLayout') private items: Array<FeedItem> = [];
   @State private refreshing: boolean = false;
-  @State private loadingMore: boolean = false;
+  @State @Watch('rebuildFlowLayout') private loadingMore: boolean = false;
   @State private canLoadMore: boolean = false;
-  @State private errorMessage: string = '';
+  @State @Watch('rebuildFlowLayout') private errorMessage: string = '';
   @State private requiresLogin: boolean = false;
   @State private resolvingMenuAuthor: boolean = false;
   @State private feedMenuVisible: boolean = false;
@@ -90,12 +93,20 @@ export struct HomeFeedPage {
   private menuRequestId: number = 0;
   /** 本会话已批量上报过曝光（touch）的条目，对齐上游 reportedTouchedItems 去重。 */
   private readonly reportedTouchIdentities: Set<string> = new Set<string>();
-  private readonly listScroller: ListScroller = new ListScroller();
+  private readonly listScroller: Scroller = new Scroller();
+  @State @Watch('rebuildFlowLayout') private feedWidthVp: number = 0;
+  // 状态栏高度（vp）晚于首帧到达时重算首屏让位（让位 = 状态栏 + 顶栏 56vp）
+  @StorageProp('statusBarHeightVp') @Watch('rebuildFlowLayout') private statusBarHeightVp: number = 0;
+  @State private flowSections: WaterFlowSections = new WaterFlowSections();
+  @State private flowLayout: FeedFlowLayout = buildFeedFlowLayout([], [], 1, 0, false, 0, floatingTitleBarOffset());
   private firstVisibleIndex: number = 0;
+  private feedHeightVp: number = 0;
 
   aboutToAppear(): void {
+    // 登记给根 HdsNavigation 做 bindToScrollable：驱动标题栏滚动模糊。
+    topLevelScrollRegistry.register(HOME_FEED_SCROLL_KEY, this.listScroller);
     // 覆盖式顶栏：Refresh 头部从页面顶端展开，把刷新圆圈绘制偏移到悬浮标题栏下沿
-    this.indicator = new FeedPullDownIndicatorHost(this.getUIContext(), FLOATING_TITLE_BAR_OFFSET);
+    this.indicator = new FeedPullDownIndicatorHost(this.getUIContext(), floatingTitleBarOffset());
     // P3-7：返回栈重显（页面实例与状态保留）时 aboutToAppear 可能再次触发；
     // 控制器仍存活时直接复用，避免重建控制器并重载列表导致滚动位置丢失。
     if (this.controller !== undefined) {
@@ -111,6 +122,7 @@ export struct HomeFeedPage {
     this.controller = new HomeFeedController(repository, (state: HomeFeedViewState): void => {
       this.applyState(state);
     });
+    this.updateInitialItemTarget();
     this.controller.activate();
     this.controller.loadInitial();
     this.createBlockingAction();
@@ -185,11 +197,10 @@ export struct HomeFeedPage {
             offset: 80,
             friction: 100
           }) {
-            List({ scroller: this.listScroller }) {
-              // 可恢复错误横幅必须是 List 内的首个 ListItem：覆盖式顶栏下 Column 顶部
-              // 就是状态栏区域，只有 List 内容项才被 contentStartOffset 内缩让位到标题栏下沿
+            WaterFlow({ scroller: this.listScroller, sections: this.flowSections,
+              layoutMode: WaterFlowLayoutMode.SLIDING_WINDOW }) {
               if (this.errorMessage.length > 0) {
-                ListItem() {
+                FlowItem() {
                   Row({ space: $r('app.float.spacing_small') }) {
                     Text(this.errorMessage)
                       .id('home_recoverable_error_text')
@@ -207,56 +218,54 @@ export struct HomeFeedPage {
                   .borderRadius($r('app.float.card_radius'))
                   .backgroundColor($r('app.color.surface_background'))
                 }
-                .margin({ bottom: $r('app.float.spacing_medium') })
               }
 
               if (isUpdateAnnouncementVisible(this.pendingUpdateVersion, this.dismissedUpdateVersion)) {
-                ListItem() {
+                FlowItem() {
                   this.updateAnnouncementCard()
                 }
-                .margin({ bottom: $r('app.float.spacing_medium') })
               }
 
               ForEach(this.items, (item: FeedItem) => {
-                ListItem() {
+                FlowItem() {
                   this.feedCard(item);
                 }
-                .margin({ bottom: this.feedCardStyle === 'card' ? $r('app.float.spacing_medium') : 0 })
+                .width('100%')
               }, (item: FeedItem): string => feedItemIdentity(item))
 
               if (this.loadingMore) {
-                // 上拉加载更多：与下拉刷新一致的圆形加载动画（onReachEnd 自动触发）
-                ListItem() {
-                  LoadingProgress()
-                    .id('home_load_more')
-                    .width(40)
-                    .height(40)
-                    .color(this.resolvedThemeColor)
+                // 尾部留白避让悬浮底栏，加载动画保持完整可见。
+                FlowItem() {
+                  FeedLoadMoreIndicator({ elementId: 'home_load_more' })
                 }
                 .width('100%')
-                .padding({ top: 12, bottom: 12 })
               }
             }
             .onScrollIndex((start: number, end: number): void => {
-              const leading = (this.errorMessage.length > 0 ? 1 : 0) +
-                (isUpdateAnnouncementVisible(this.pendingUpdateVersion, this.dismissedUpdateVersion) ? 1 : 0);
-              this.controller?.markVisibleThrough(end - leading);
-              const previous = this.firstVisibleIndex;
-              this.firstVisibleIndex = start;
-              if (start > previous) {
-                AppStorage.setOrCreate('bottomBarHiddenByScroll', true);
-              } else if (start < previous || start === 0) {
-                AppStorage.setOrCreate('bottomBarHiddenByScroll', false);
+              const lastItem: number = feedFlowItemIndex(this.flowLayout, end);
+              this.controller?.markVisibleThrough(lastItem);
+              // 多列首屏可能容纳整页数据，提前请求下一页，避免只能等待触底事件。
+              if (lastItem >= this.items.length - 3 && this.items.length > 0 && this.canLoadMore) {
+                this.controller?.loadMore();
               }
+              this.firstVisibleIndex = start;
             })
             .id('home_feed_list')
             .width('100%')
-            // 顶栏让位：内缩滚动内容起点，未滚动时首条卡片仍从标题栏下沿开始
-            .contentStartOffset(FLOATING_TITLE_BAR_OFFSET)
+            .onDidScroll((offset: number): void => {
+              if (offset !== 0) {
+                AppStorage.setOrCreate('bottomBarHiddenByScroll', offset > 0);
+              }
+            })
             .scrollBar(BarState.Off)
             .height('100%')
             .edgeEffect(EdgeEffect.Spring)
             .onReachEnd(() => this.controller?.loadMore())
+            // 容器挂到组件后再登记一次：aboutToAppear 时 Scroller 还没挂上组件，
+            // 根标题栏绑定它拿不到偏移，必须等挂载后才能建立订阅。
+            .onAppear((): void => {
+              topLevelScrollRegistry.register(HOME_FEED_SCROLL_KEY, this.listScroller);
+            })
           }
           .id('home_pull_refresh')
           .width('100%')
@@ -277,11 +286,19 @@ export struct HomeFeedPage {
       .width('100%')
       .height('100%')
       // 覆盖式顶栏：容器不设 top padding，滚动视口一直延伸到屏幕顶，卡片滚起来后
-      // 穿过玻璃标题栏形成沉浸光感；首屏起始位置由列表的 contentStartOffset 内缩。
+      // 穿过玻璃标题栏形成沉浸光感；首屏起始位置由首个瀑布流分组的上边距让位。
       .padding({
         left: $r('app.float.page_padding'),
         right: $r('app.float.page_padding'),
         bottom: $r('app.float.page_padding')
+      })
+      .onAreaChange((_oldValue: Area, area: Area): void => {
+        const width: number = Number(area.width);
+        if (width > 0 && Math.abs(width - this.feedWidthVp) > 0.5) {
+          this.feedWidthVp = width;
+        }
+        this.feedHeightVp = Number(area.height);
+        this.updateInitialItemTarget();
       })
 
       if (this.showRefreshFab && this.phase === HomeFeedPhase.READY) {
@@ -423,14 +440,14 @@ export struct HomeFeedPage {
     .id(`home_feed_card_${item.target.kind}_${item.target.id}`)
     .width('100%')
     .padding($r('app.float.card_padding'))
-    .borderRadius(this.feedCardStyle === 'card' ? $r('app.float.card_radius') : 0)
-    .backgroundColor(this.feedCardStyle === 'card' ? $r('app.color.surface_background') : Color.Transparent)
+    .borderRadius(this.usesCardSurface() ? $r('app.float.card_radius') : 0)
+    .backgroundColor(this.usesCardSurface() ? $r('app.color.surface_background') : Color.Transparent)
     // border 的 radius 优先级高于 borderRadius 属性（未指定时按 0 处理），
     // 卡片模式必须把圆角同步写进 border，否则背景圆角被重置成直角。
     .border({
-      width: { bottom: this.feedCardStyle === 'divider' ? 1 : 0 },
+      width: { bottom: !this.usesCardSurface() ? 1 : 0 },
       color: $r('app.color.divider_color'),
-      radius: this.feedCardStyle === 'card' ? $r('app.float.card_radius') : 0
+      radius: this.usesCardSurface() ? $r('app.float.card_radius') : 0
     })
     .accessibilityText((item.target.qualityFilterReason ?? '').length > 0
       ? `已屏蔽：${item.target.qualityFilterReason}`
@@ -743,6 +760,27 @@ export struct HomeFeedPage {
         void this.controller?.refresh();
       }
     });
+  }
+
+  private usesCardSurface(): boolean {
+    return this.feedWidthVp >= FEED_TWO_COLUMN_MIN_WIDTH || this.feedCardStyle === 'card';
+  }
+
+  private updateInitialItemTarget(): void {
+    this.controller?.setInitialItemTarget(
+      homeFeedInitialItemTarget(this.feedWidthVp, this.feedHeightVp, floatingTitleBarOffset()));
+  }
+
+  private rebuildFlowLayout(): void {
+    const columns: number = this.feedWidthVp >= FEED_TWO_COLUMN_MIN_WIDTH ? 2 : 1;
+    const leading: number = (this.errorMessage.length > 0 ? 1 : 0) +
+      (isUpdateAnnouncementVisible(this.pendingUpdateVersion, this.dismissedUpdateVersion) ? 1 : 0);
+    const gap: number = this.usesCardSurface() ? this.getUIContext().px2vp(this.getUIContext().getHostContext()!.resourceManager.getNumber($r('app.float.spacing_medium').id)) : 0;
+    this.flowLayout = buildFeedFlowLayout(
+      this.items.map((item: FeedItem): string => feedItemIdentity(item)),
+      [],
+      columns, leading, this.loadingMore, gap, floatingTitleBarOffset());
+    this.flowSections.splice(0, this.flowSections.length(), this.flowLayout.sections);
   }
 
   private applyState(state: HomeFeedViewState): void {

@@ -1,5 +1,5 @@
 import { LengthMetrics } from '@kit.ArkUI';
-import { hdsMaterial, ScrollEffectType, TitleBarStyleOptions } from '@kit.UIDesignKit';
+import { BlurStrategy, hdsMaterial, ScrollEffectType, TitleBarStyleOptions } from '@kit.UIDesignKit';
 import { ImmersiveMaterialMode } from 'data';
 import { HarmonyOSCapabilities } from '../platform/HarmonyOSCapabilities';
 import {
@@ -135,6 +135,77 @@ export function getPersistentImmersiveTitleBarStyle(materialMode: ImmersiveMater
     scrollEffectStyle: {
       backgroundStyle: {
         backgroundColor: $r('app.color.immersive_title_background')
+      }
+    }
+  };
+}
+
+/**
+ * 顶级页签（首页/关注/热榜/日报/我的）根顶栏样式，对齐华为原生应用（花粉俱乐部/应用市场）
+ * 的「沉浸光感标题栏」实现：材质层 + 渐变模糊 + 内容区从顶栏下方穿过。
+ *
+ * 分两条路径：
+ * 1. 设备支持沉浸光感（`getSystemMaterialTypes()` 含 IMMERSIVE，旗舰真机走这条）：
+ *    `systemMaterialEffect` 提供薄玻璃材质，模糊用 IMMERSIVE_GRADIENT_BLUR 渐变。
+ * 2. 不支持（含模拟器，实测 `getSystemMaterialTypes()` 返回空数组）：材质会退化成
+ *    灰白实色、渐变模糊几乎不出模糊，正文清晰透出顶栏。改走 COMMON_BLUR 均匀模糊
+ *    + 半透明主题底兜底；`blurStrategy` 必须显式 ENABLE（ADAPTIVE 会把模糊压得很弱）。
+ *
+ * 模糊带只在滚动后出现：`maskExtraHeight`（遮罩超出标题栏的额外高度）放在
+ * `scrollEffectStyle` 里给 40vp，`originalStyle` 保持 0——未滑动时首屏内容清晰，
+ * 滑动出现滚动效果后顶栏下方多出一条由深到浅的渐变模糊带（对齐华为原生应用：
+ * 滑动几像素就把标题栏下方约 40vp 的内容糊掉，停下保持、退回顶部又恢复清晰）。
+ * 过渡终点取 10vp，使这条带子在第一下轻微滑动内就基本成形。
+ * 两条路径都不改变内容让位（状态栏 + 56vp），切换设备不会出现布局跳动。
+ */
+const ROOT_CHROME_SCROLL_MASK_EXTRA_HEIGHT: number = 40;
+
+export function getRootChromeTitleBarStyle(materialMode: ImmersiveMaterialMode,
+  materialSupport: ImmersiveMaterialSupportState): TitleBarStyleOptions {
+  if (materialSupport === ImmersiveMaterialSupportState.SUPPORTED) {
+    return {
+      scrollEffectOpts: {
+        enableScrollEffect: true,
+        scrollEffectType: ScrollEffectType.IMMERSIVE_GRADIENT_BLUR,
+        blurEffectiveStartOffset: LengthMetrics.vp(0),
+        blurEffectiveEndOffset: LengthMetrics.vp(10)
+      },
+      systemMaterialEffect: {
+        materialType: hdsMaterial.MaterialType.ADAPTIVE,
+        materialLevel: hdsMaterialLevelFor(resolveImmersiveMaterialLevel(materialMode, materialSupport))
+      },
+      originalStyle: {
+        backgroundStyle: {
+          backgroundColor: $r('app.color.immersive_title_background'),
+          maskExtraHeight: 0
+        }
+      },
+      scrollEffectStyle: {
+        backgroundStyle: {
+          backgroundColor: $r('app.color.immersive_title_background'),
+          maskExtraHeight: ROOT_CHROME_SCROLL_MASK_EXTRA_HEIGHT
+        }
+      }
+    };
+  }
+  return {
+    scrollEffectOpts: {
+      enableScrollEffect: true,
+      scrollEffectType: ScrollEffectType.COMMON_BLUR,
+      blurEffectiveStartOffset: LengthMetrics.vp(0),
+      blurEffectiveEndOffset: LengthMetrics.vp(10)
+    },
+    blurStrategy: BlurStrategy.ENABLE,
+    originalStyle: {
+      backgroundStyle: {
+        backgroundColor: $r('app.color.root_chrome_background'),
+        maskExtraHeight: 0
+      }
+    },
+    scrollEffectStyle: {
+      backgroundStyle: {
+        backgroundColor: $r('app.color.root_chrome_background'),
+        maskExtraHeight: ROOT_CHROME_SCROLL_MASK_EXTRA_HEIGHT
       }
     }
   };

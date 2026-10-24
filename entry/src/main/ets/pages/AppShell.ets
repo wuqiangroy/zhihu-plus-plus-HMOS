@@ -38,7 +38,8 @@ import {
   SessionStatus,
   shouldAutoCheckForUpdate,
   shouldShowWhatsNewOnLaunch,
-  getAppDatabase
+  getAppDatabase,
+  ChannelFeedSource
 } from 'data';
 import ConfigurationConstant from '@ohos.app.ability.ConfigurationConstant';
 import bundleManager from '@ohos.bundle.bundleManager';
@@ -63,13 +64,18 @@ import {
   startupDestinationChannel,
   StartupDestinationListener
 } from 'core';
-import { AppNavigationRow } from './AppPageChrome';
+import { AppNavigationRow, floatingTitleBarOffset } from './AppPageChrome';
+import {
+  HOME_FEED_SCROLL_KEY,
+  SETTINGS_SCROLL_KEY,
+  topLevelScrollRegistry
+} from './TopLevelScrollRegistry';
 import {
   TopLevelTab,
   topLevelTabForDestination
 } from './TopLevelTabs';
 import { DividerShowType, hdsMaterial, HdsNavDestination, HdsNavigation, HdsNavigationAttribute, HdsNavigationTitleMode, HdsTabsController } from '@kit.UIDesignKit';
-import { getChatTitleBarStyle, getImmersiveTitleBarStyle, getPersistentImmersiveTitleBarStyle } from '../common/style/NavStyles';
+import { getChatTitleBarStyle, getImmersiveTitleBarStyle, getPersistentImmersiveTitleBarStyle, getRootChromeTitleBarStyle } from '../common/style/NavStyles';
 import {
   decodeImmersiveMaterialSupport,
   ImmersiveMaterialSupportState
@@ -200,8 +206,15 @@ export struct AppShell {
   @State private dailyReloadToken: number = 0;
   // 关注页子页签（推荐/动态）当前选中项：经 AppStorage 与关注页 Swiper 双向同步
   // （标题栏点选写 tick，关注页滑动写 index），@Consume 在 HdsTabs 树下实测不链接。
-  @StorageProp('followingSelectedTabIndex') private followingTitleSelectedIndex: number = 0;
+  @StorageProp('followingSelectedTabIndex') @Watch('refreshTabScrollerBindings')
+  private followingTitleSelectedIndex: number = 0;
   @StorageProp('dailyViewingDate') private dailyViewingDate: string = '';
+  // 每个页签各有一套 HdsNavigation 顶栏，只绑定该页签自己的滚动容器：
+  // 滚动模糊状态因此按页签隔离，切页签不会继承上一页的模糊。
+  // 页签页登记容器后经 AppStorage 广播，这里重算各页签的绑定。
+  @StorageProp('topLevelScrollableTick') @Watch('refreshTabScrollerBindings')
+  private topLevelScrollableTick: number = 0;
+  @State private tabScrollerBindings: Map<number, Array<Scroller>> = new Map<number, Array<Scroller>>();
   @State private dailyDateCursor: string = '';
   @Provide('channelFeedInteractionBridge') private channelFeedInteractionBridge: ChannelFeedInteractionBridge =
     new ChannelFeedInteractionBridge();
@@ -233,9 +246,55 @@ export struct AppShell {
   /** 沉浸光感偏好唯一写入入口（aboutToAppear 创建）：复用 store 串行 saveQueue，
    * 快速切换最终保存最后一次选择；设置页退出后由本组件继续完成保存。 */
   private immersiveMaterialStore: AppPreferencesStore | undefined = undefined;
+  /** “我的”页滚动容器：同样登记给根 HdsNavigation，滚动时顶栏才会出模糊。 */
+  private readonly settingsScroller: Scroller = new Scroller();
+
+  /** 某页签自己的滚动容器标识（关注页按当前子页签取推荐/动态）。 */
+  private scrollKeysForTab(tab: number): string[] {
+    if (tab === TopLevelTab.HOME) {
+      return [HOME_FEED_SCROLL_KEY];
+    }
+    if (tab === TopLevelTab.FOLLOWING) {
+      return [this.followingTitleSelectedIndex === 0
+        ? ChannelFeedSource.FOLLOWING_RECOMMEND : ChannelFeedSource.FOLLOWING];
+    }
+    if (tab === TopLevelTab.HOT) {
+      return [ChannelFeedSource.HOT];
+    }
+    if (tab === TopLevelTab.DAILY) {
+      return [ChannelFeedSource.DAILY];
+    }
+    if (tab === TopLevelTab.ACCOUNT) {
+      return [SETTINGS_SCROLL_KEY];
+    }
+    return [];
+  }
+
+  /** 重算各页签的滚动容器绑定：只取已挂到组件上的容器（Scroller 未挂载时
+   * 绑定拿不到偏移，订阅会丢），未登记的页签保持空绑定，等容器 onAppear 再登记。 */
+  private refreshTabScrollerBindings(): void {
+    const tabs: number[] = [TopLevelTab.HOME, TopLevelTab.FOLLOWING, TopLevelTab.HOT,
+      TopLevelTab.DAILY, TopLevelTab.HISTORY, TopLevelTab.COLLECTIONS, TopLevelTab.ACCOUNT];
+    const next: Map<number, Array<Scroller>> = new Map<number, Array<Scroller>>();
+    tabs.forEach((tab: number): void => {
+      const mounted: Array<Scroller> = topLevelScrollRegistry.scrollersFor(this.scrollKeysForTab(tab))
+        .filter((scroller: Scroller): boolean => scroller.currentOffset() !== undefined);
+      if (mounted.length > 0) {
+        next.set(tab, mounted);
+      }
+    });
+    this.tabScrollerBindings = next;
+  }
+
+  private tabScrollerBinding(tab: number): Array<Scroller> {
+    const binding: Array<Scroller> | undefined = this.tabScrollerBindings.get(tab);
+    return binding === undefined ? [] : binding;
+  }
 
   aboutToAppear(): void {
     this.themeMounted = true;
+    topLevelScrollRegistry.register(SETTINGS_SCROLL_KEY, this.settingsScroller);
+    this.refreshTabScrollerBindings();
     // 主题恢复完成前先按跟随系统广播（EntryAbility.onConfigurationUpdate 依赖该键判断是否联动公式换色）。
     AppStorage.setOrCreate('appThemeMode', AppThemeMode.SYSTEM);
     AppStorage.setOrCreate('formulaForegroundColor', this.resolveFormulaForegroundColor(AppThemeMode.SYSTEM));
@@ -1038,21 +1097,40 @@ export struct AppShell {
         // 实时变更后 TabContent 属性（id/tabBar）刷新但内容仍是旧顺序的页面。
         ForEach(this.bottomBarOrder, (tab: number): void => {
           TabContent() {
-            this.topLevelTabPage(tab as TopLevelTab)
+            // 每个页签一套独立 HdsNavigation 顶栏：滚动模糊状态跟着自己的容器走，
+            // 互不继承（对齐华为原生应用的分页表现）。
+            HdsNavigation() {
+              this.topLevelTabPage(tab as TopLevelTab)
+            }
+            .titleBar({
+              // 对齐华为原生应用的沉浸光感标题栏：支持 IMMERSIVE 材质的设备走材质 + 渐变模糊，
+              // 不支持的设备（含模拟器）降级为均匀模糊 + 半透明底；两条路径让位一致。
+              style: getRootChromeTitleBarStyle(this.immersiveMaterialMode(),
+                this.immersiveMaterialSupportState()),
+              avoidLayoutSafeArea: true,
+              content: {
+                stackBuilder: (): void => this.rootTitleBarContent(),
+                divider: { showType: DividerShowType.OFF }
+              }
+            })
+            .titleMode(HdsNavigationTitleMode.MINI)
+            .hideBackButton(true)
+            .mode(NavigationMode.Stack)
+            .monopolizeEvents(false)
+            // 只绑定本页签自己的滚动容器（未挂载时为空，容器 onAppear 登记后补上）。
+            .bindToScrollable(this.tabScrollerBinding(tab))
+            .backgroundColor($r('app.color.page_background'))
+            .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+            // 顶栏透明后模糊层只跟随标题栏自身区域；TOP 也纳入 ignoreLayoutSafeArea 后，
+            // 模糊才继续铺到状态栏区域（官方问答口径），否则状态栏那段内容不模糊。
+            .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM],
+              [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
           }
           .id(`top_level_${this.tabKey(tab as TopLevelTab)}_content`)
           .tabBar(this.topLevelTabBarStyle(tab as TopLevelTab))
         }, (tab: number): string => `${tab}`)
       }
     }
-    .titleBar({
-      style: getImmersiveTitleBarStyle(this.immersiveMaterialMode(), this.immersiveMaterialSupportState()),
-      avoidLayoutSafeArea: true,
-      content: {
-        stackBuilder: (): void => this.rootTitleBarContent(),
-        divider: { showType: DividerShowType.OFF }
-      }
-    })
     .titleMode(HdsNavigationTitleMode.MINI)
     .hideBackButton(true)
     .mode(NavigationMode.Stack)
@@ -1060,7 +1138,7 @@ export struct AppShell {
     .navDestination(this.destinationBuilder)
     .backgroundColor($r('app.color.page_background'))
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-    .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.BOTTOM])
+    .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
   }
 
   @Builder
@@ -1459,7 +1537,7 @@ export struct AppShell {
   @Builder
   settingsPage() {
     Stack({ alignContent: Alignment.TopStart }) {
-      Scroll() {
+      Scroll(this.settingsScroller) {
         Column({ space: $r('app.float.spacing_large') }) {
           this.accountOverview()
           this.accountQuickActions()
@@ -1599,7 +1677,8 @@ export struct AppShell {
       .padding({
         left: $r('app.float.page_padding'),
         right: $r('app.float.page_padding'),
-        top: 94,
+        // 与信息流一致：状态栏 + HDS 标题栏自身高度。
+        top: floatingTitleBarOffset(),
         // HdsTabs 的悬浮底栏会覆盖滚动区末端；为最后一个设置项预留可点击空间。
         bottom: 96
       })

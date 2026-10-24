@@ -30,6 +30,42 @@ export enum AppPageStatusKind {
  */
 export const FLOATING_TITLE_BAR_OFFSET: number = 94;
 
+/** HDS 标题栏自身高度（vp）：首屏让位 = 状态栏高度 + 该值。 */
+export const ROOT_TITLE_BAR_CONTENT_HEIGHT: number = 56;
+
+/**
+ * 顶栏让位高度（vp）：状态栏高度 + HDS 标题栏自身高度（56vp），按固定常量兜底。
+ *
+ * 根顶栏已按华为官方样例改成「透明底 + HDS 自带滚动模糊」，玻璃只在标题栏自身
+ * 高度内生效，因此让位不再跟随标题栏下方那段模糊蒙层（maskExtraHeight，默认
+ * 32vp），内容可以像系统应用一样紧贴顶栏下沿。
+ */
+export function floatingTitleBarOffset(): number {
+  const statusBar: number = AppStorage.get<number>('statusBarHeightVp') ?? 0;
+  return Math.max(FLOATING_TITLE_BAR_OFFSET, statusBar + ROOT_TITLE_BAR_CONTENT_HEIGHT);
+}
+
+/** 加载更多时给悬浮底栏及系统手势区留出空间，圆圈完整停在底栏上方。 */
+@Component
+export struct FeedLoadMoreIndicator {
+  elementId: string = '';
+  @StorageProp('resolvedThemeColor') private resolvedThemeColor: string = DEFAULT_THEME_COLOR;
+  @StorageProp('bottomRectHeight') private bottomRectHeightVp: number = 0;
+
+  build() {
+    Column() {
+      LoadingProgress()
+        .id(this.elementId)
+        .width(40)
+        .height(40)
+        .color(this.resolvedThemeColor)
+    }
+    .width('100%')
+    // 与 ZhihuHdsTabs 的 64vp 底栏同口径，另留 12vp 间隔。
+    .padding({ top: 12, bottom: 64 + Math.max(0, this.bottomRectHeightVp) + 12 })
+  }
+}
+
 @Component
 export struct AppPageHeader {
   /** 当前生效主题色（AppShell 广播），驱动标题栏动作按钮强调色。 */

@@ -1,3 +1,4 @@
+import feedWaterfallLayoutTest from './FeedWaterfallLayout.test';
 import homeFeedMenuStateTest from './HomeFeedMenuState.test';
 import adaptiveOverlayLayoutTest from './AdaptiveOverlayLayout.test';
 import apiLevelTest from './ApiLevel.test';
@@ -97,6 +98,7 @@ import linkCardMetaTest from './LinkCardMeta.test';
 import segmentReactionRepositoryTest from './SegmentReactionRepository.test';
 
 export default function testsuite(): void {
+  feedWaterfallLayoutTest();
   apiLevelTest();
   backgroundWorkPolicyTest();
   cookieSessionTest();

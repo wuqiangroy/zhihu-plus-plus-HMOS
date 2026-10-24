@@ -1,3 +1,4 @@
+import { buildFeedFlowLayout, FeedFlowEntry, FeedFlowLayout, feedFlowItemIndex, FEED_TWO_COLUMN_MIN_WIDTH } from './FeedWaterfallLayout';
 import { FeedContentSummary } from './components/FeedContentSummary';
 import { HotQuestionStatistics } from './components/HotQuestionStatistics';
 import { isSafeDecimalContentId, AppDestination, AppDestinationName } from 'core';
@@ -29,8 +30,9 @@ import {
 import {
   AppPageStatusKind,
   AppPageStatusPanel,
+  FeedLoadMoreIndicator,
   FeedPullDownIndicatorHost,
-  FLOATING_TITLE_BAR_OFFSET
+  floatingTitleBarOffset
 } from './AppPageChrome';
 import {
   ChannelFeedController,
@@ -42,6 +44,7 @@ import {
 import { dailyStoryDetailErrorMessage } from './DailyStoryDetailState';
 import { dailyFeedDateAtIndex, formatDailyDate } from './DailyFeedDates';
 import { DraggableRefreshButton } from './components/DraggableRefreshButton';
+import { topLevelScrollRegistry } from './TopLevelScrollRegistry';
 
 @Component
 export struct ChannelFeedPage {
@@ -72,7 +75,7 @@ export struct ChannelFeedPage {
   @StorageProp('tabScrollTopTabIndex') private tabScrollTopTabIndex: number = -1;
   @StorageProp('showFeedThumbnail') private showFeedThumbnail: boolean = true;
   @StorageProp('showRefreshFab') private showRefreshFab: boolean = true;
-  @StorageProp('feedCardStyle') private feedCardStyle: string = 'divider';
+  @StorageProp('feedCardStyle') @Watch('rebuildFlowLayout') private feedCardStyle: string = 'divider';
   @StorageProp('fabOpacity') private fabOpacity: number = 100;
   @StorageProp('resolvedThemeColor') private resolvedThemeColor: string = DEFAULT_THEME_COLOR;
   @StorageProp('followingTimeOrder') @Watch('applyFollowingOrder') private followingTimeOrder: boolean = false;
@@ -83,12 +86,12 @@ export struct ChannelFeedPage {
   navigate: (destination: AppDestination) => void = (_destination: AppDestination): void => {
   };
   @State private phase: ChannelFeedPhase = ChannelFeedPhase.IDLE;
-  @State private items: Array<ChannelFeedItem> = [];
+  @State @Watch('rebuildFlowLayout') private items: Array<ChannelFeedItem> = [];
   @State private refreshing: boolean = false;
-  @State private loadingMore: boolean = false;
+  @State @Watch('rebuildFlowLayout') private loadingMore: boolean = false;
   @State private canLoadMore: boolean = false;
   @State private requiresLogin: boolean = false;
-  @State private errorMessage: string = '';
+  @State @Watch('rebuildFlowLayout') private errorMessage: string = '';
   @State private pendingUserBlock?: BlockingUserCandidate = undefined;
   @State private keywordBlockVisible: boolean = false;
   @State private keywordBlockInput: string = '';
@@ -99,15 +102,23 @@ export struct ChannelFeedPage {
   private controller?: ChannelFeedController;
   private blockingAction?: BlockingActionController;
   private pendingBlockItem?: ChannelContentItem = undefined;
-  private readonly listScroller: ListScroller = new ListScroller();
+  private readonly listScroller: Scroller = new Scroller();
+  @State @Watch('rebuildFlowLayout') private feedWidthVp: number = 0;
+  // 状态栏高度（vp）晚于首帧到达时重算首屏让位（让位 = 状态栏 + 顶栏 56vp）
+  @StorageProp('statusBarHeightVp') @Watch('rebuildFlowLayout') private statusBarHeightVp: number = 0;
+  @State private flowSections: WaterFlowSections = new WaterFlowSections();
+  @State private flowLayout: FeedFlowLayout = buildFeedFlowLayout([], [], 1, 0, false, 0, floatingTitleBarOffset());
   private firstVisibleIndex: number = 0;
   private handledDateSelectionTick: number = 0;
   private pageActive: boolean = false;
 
   aboutToAppear(): void {
     this.pageActive = true;
+    // 登记给根 HdsNavigation 做 bindToScrollable：驱动标题栏滚动模糊（以 source 为页签标识，
+    // 根标题栏只绑定当前可见页签，关注页两个子页签因此不会互相带出模糊）。
+    topLevelScrollRegistry.register(this.source, this.listScroller);
     // 覆盖式顶栏：Refresh 头部从页面顶端展开，把刷新圆圈绘制偏移到悬浮标题栏下沿
-    this.indicator = new FeedPullDownIndicatorHost(this.getUIContext(), FLOATING_TITLE_BAR_OFFSET);
+    this.indicator = new FeedPullDownIndicatorHost(this.getUIContext(), floatingTitleBarOffset());
     // P3-7：返回栈重显（页面实例与状态保留）时 aboutToAppear 可能再次触发；
     // 控制器仍存活时直接复用，避免重建控制器并重载列表导致滚动位置丢失。
     if (this.controller !== undefined) {
@@ -236,11 +247,10 @@ export struct ChannelFeedPage {
           offset: 80,
           friction: 100
         }) {
-          List({ scroller: this.listScroller }) {
-            // 可恢复错误横幅必须是 List 内的首个 ListItem：覆盖式顶栏下 Column 顶部
-            // 就是状态栏区域，只有 List 内容项才被 contentStartOffset 内缩让位到标题栏下沿
+          WaterFlow({ scroller: this.listScroller, sections: this.flowSections,
+              layoutMode: WaterFlowLayoutMode.SLIDING_WINDOW }) {
             if (this.errorMessage.length > 0) {
-              ListItem() {
+              FlowItem() {
                 Row({ space: $r('app.float.spacing_small') }) {
                   Text(this.errorMessage)
                     .fontSize($r('app.float.secondary_font_size'))
@@ -265,64 +275,55 @@ export struct ChannelFeedPage {
                 .borderRadius($r('app.float.card_radius'))
                 .backgroundColor($r('app.color.surface_background'))
               }
-              .margin({ bottom: $r('app.float.spacing_medium') })
             }
 
             if (this.topContentVisible) {
-              ListItem() {
+              FlowItem() {
                 this.topContent()
               }
               .width('100%')
             }
-            ForEach(this.items, (item: ChannelFeedItem, index: number) => {
-              ListItem() {
-                if (item.kind === ChannelFeedItemKind.CONTENT) {
-                  this.contentCard(item, index);
+            ForEach(this.flowLayout.entries, (entry: FeedFlowEntry) => {
+              FlowItem() {
+                if (entry.date.length > 0) {
+                  this.dailyDateDivider(entry.date);
                 } else {
-                  Column({ space: 12 }) {
-                    if (index === 0 || dailyFeedDateAtIndex(this.items, index - 1) !== item.story.date) {
-                      this.dailyDateDivider(item.story.date);
-                    }
-                    this.dailyCard(item);
-                  }
-                  .width('100%')
+                  this.flowContent(entry.itemIndex);
                 }
               }
-              .margin({ bottom: this.feedCardStyle === 'card' ? $r('app.float.spacing_medium') : 0 })
-            }, (item: ChannelFeedItem): string => channelFeedItemIdentity(item))
+              .width('100%')
+            }, (entry: FeedFlowEntry): string => `${entry.key}:${entry.itemIndex}`)
+
 
             if (this.loadingMore) {
-              // 上拉加载更多：与下拉刷新一致的圆形加载动画（onReachEnd 自动触发）
-              ListItem() {
-                LoadingProgress()
-                  .id(`channel_${this.source}_load_more`)
-                  .width(40)
-                  .height(40)
-                  .color(this.resolvedThemeColor)
+              // 与首页共用加载区，避让悬浮底栏和系统手势区。
+              FlowItem() {
+                FeedLoadMoreIndicator({ elementId: `channel_${this.source}_load_more` })
               }
               .width('100%')
-              .padding({ top: 12, bottom: 12 })
             }
           }
           .id(`channel_${this.source}_list`)
           .width('100%')
-          // 顶栏让位：内缩滚动内容起点，未滚动时首条卡片仍从标题栏下沿开始
-          .contentStartOffset(FLOATING_TITLE_BAR_OFFSET)
-          .scrollBar(BarState.Off)
+          .onDidScroll((offset: number): void => {
+              if (offset !== 0) {
+                AppStorage.setOrCreate('bottomBarHiddenByScroll', offset > 0);
+              }
+            })
+            .scrollBar(BarState.Off)
+            // 容器挂到组件后再登记一次：aboutToAppear 时 Scroller 还没挂上组件，
+            // 根标题栏绑定它拿不到偏移，必须等挂载后才能建立订阅。
+            .onAppear((): void => {
+              topLevelScrollRegistry.register(this.source, this.listScroller);
+            })
           .height('100%')
           .edgeEffect(EdgeEffect.Spring)
           .onReachEnd(() => this.controller?.loadMore())
           .onScrollIndex((start: number, end: number): void => {
-            const previous = this.firstVisibleIndex;
             this.firstVisibleIndex = start;
-            if (start > previous) {
-              AppStorage.setOrCreate('bottomBarHiddenByScroll', true);
-            } else if (start < previous || start === 0) {
-              AppStorage.setOrCreate('bottomBarHiddenByScroll', false);
-            }
             if (this.source === ChannelFeedSource.DAILY) {
               this.publishDailyViewingDate();
-              if (end >= this.items.length - 3) {
+              if (feedFlowItemIndex(this.flowLayout, end) >= this.items.length - 3) {
                 this.controller?.loadMore();
               }
             }
@@ -354,11 +355,17 @@ export struct ChannelFeedPage {
       .width('100%')
       .height('100%')
       // 覆盖式顶栏：容器不设 top padding，滚动视口一直延伸到屏幕顶，卡片滚起来后
-      // 穿过玻璃标题栏形成沉浸光感；首屏起始位置由列表的 contentStartOffset 内缩。
+      // 穿过玻璃标题栏形成沉浸光感；首屏起始位置由首个瀑布流分组的上边距让位。
       .padding({
         left: $r('app.float.page_padding'),
         right: $r('app.float.page_padding'),
         bottom: $r('app.float.page_padding')
+      })
+      .onAreaChange((_oldValue: Area, area: Area): void => {
+        const width: number = Number(area.width);
+        if (width > 0 && Math.abs(width - this.feedWidthVp) > 0.5) {
+          this.feedWidthVp = width;
+        }
       })
 
       if (this.showRefreshFab && this.phase === ChannelFeedPhase.READY) {
@@ -506,14 +513,14 @@ export struct ChannelFeedPage {
     .id(`channel_content_${item.feedItem.target.kind}_${item.feedItem.target.id}`)
     .width('100%')
     .padding($r('app.float.card_padding'))
-    .borderRadius(this.feedCardStyle === 'card' ? $r('app.float.card_radius') : 0)
-    .backgroundColor(this.feedCardStyle === 'card' ? $r('app.color.surface_background') : Color.Transparent)
+    .borderRadius(this.usesCardSurface() ? $r('app.float.card_radius') : 0)
+    .backgroundColor(this.usesCardSurface() ? $r('app.color.surface_background') : Color.Transparent)
     // border 的 radius 优先级高于 borderRadius 属性（未指定时按 0 处理），
     // 卡片模式必须把圆角同步写进 border，否则背景圆角被重置成直角。
     .border({
-      width: { bottom: this.feedCardStyle === 'divider' ? 1 : 0 },
+      width: { bottom: !this.usesCardSurface() ? 1 : 0 },
       color: $r('app.color.divider_color'),
-      radius: this.feedCardStyle === 'card' ? $r('app.float.card_radius') : 0
+      radius: this.usesCardSurface() ? $r('app.float.card_radius') : 0
     })
     .accessibilityText(`打开${channelKindLabel(item.feedItem.target.kind)}：${item.feedItem.target.title}`)
     .onClick(() => {
@@ -577,14 +584,14 @@ export struct ChannelFeedPage {
     .id(`channel_daily_${item.story.id}`)
     .width('100%')
     .padding($r('app.float.card_padding'))
-    .borderRadius(this.feedCardStyle === 'card' ? $r('app.float.card_radius') : 0)
-    .backgroundColor(this.feedCardStyle === 'card' ? $r('app.color.surface_background') : Color.Transparent)
+    .borderRadius(this.usesCardSurface() ? $r('app.float.card_radius') : 0)
+    .backgroundColor(this.usesCardSurface() ? $r('app.color.surface_background') : Color.Transparent)
     // border 的 radius 优先级高于 borderRadius 属性（未指定时按 0 处理），
     // 卡片模式必须把圆角同步写进 border，否则背景圆角被重置成直角。
     .border({
-      width: { bottom: this.feedCardStyle === 'divider' ? 1 : 0 },
+      width: { bottom: !this.usesCardSurface() ? 1 : 0 },
       color: $r('app.color.divider_color'),
-      radius: this.feedCardStyle === 'card' ? $r('app.float.card_radius') : 0
+      radius: this.usesCardSurface() ? $r('app.float.card_radius') : 0
     })
     .accessibilityText(`知乎日报：${item.story.title}`)
     .onClick((): void => {
@@ -760,6 +767,31 @@ export struct ChannelFeedPage {
     .borderRadius($r('app.float.card_radius'))
   }
 
+  @Builder
+  private flowContent(index: number) {
+    if (this.items[index].kind === ChannelFeedItemKind.CONTENT) {
+      this.contentCard(this.items[index] as ChannelContentItem, index);
+    } else {
+      this.dailyCard(this.items[index] as ChannelDailyStoryItem);
+    }
+  }
+
+  private usesCardSurface(): boolean {
+    return this.feedWidthVp >= FEED_TWO_COLUMN_MIN_WIDTH || this.feedCardStyle === 'card';
+  }
+
+  private rebuildFlowLayout(): void {
+    const columns: number = this.feedWidthVp >= FEED_TWO_COLUMN_MIN_WIDTH ? 2 : 1;
+    const leading: number = (this.errorMessage.length > 0 ? 1 : 0) +
+      (this.topContentVisible ? 1 : 0);
+    const gap: number = this.usesCardSurface() ? this.getUIContext().px2vp(this.getUIContext().getHostContext()!.resourceManager.getNumber($r('app.float.spacing_medium').id)) : 0;
+    this.flowLayout = buildFeedFlowLayout(
+      this.items.map((item: ChannelFeedItem): string => channelFeedItemIdentity(item)),
+      this.items.map((item: ChannelFeedItem): string => item.kind === ChannelFeedItemKind.DAILY_STORY ? item.story.date : ''),
+      columns, leading, this.loadingMore, gap, floatingTitleBarOffset());
+    this.flowSections.splice(0, this.flowSections.length(), this.flowLayout.sections);
+  }
+
   private applyState(state: ChannelFeedViewState): void {
     const replacedDailyPage = this.source === ChannelFeedSource.DAILY &&
       (this.phase === ChannelFeedPhase.INITIAL_LOADING || this.refreshing) &&
@@ -786,7 +818,7 @@ export struct ChannelFeedPage {
   }
 
   private publishDailyViewingDate(): void {
-    const date = dailyFeedDateAtIndex(this.items, this.firstVisibleIndex);
+    const date = dailyFeedDateAtIndex(this.items, Math.max(0, feedFlowItemIndex(this.flowLayout, this.firstVisibleIndex)));
     if (AppStorage.get<string>('dailyViewingDate') !== date) {
       AppStorage.setOrCreate('dailyViewingDate', date);
     }
