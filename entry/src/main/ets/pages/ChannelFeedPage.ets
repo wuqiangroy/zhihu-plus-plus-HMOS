@@ -500,7 +500,13 @@ export struct ChannelFeedPage {
           .accessibilityText('屏蔽作者或关键词')
         }
         .width('100%')
-        FeedContentSummary({ target: item.feedItem.target, showStatistics: this.source !== ChannelFeedSource.HOT })
+        // 热榜条目是问题（接口只给 question，无作者）：不渲染作者行，避免「空头像 + 知乎用户」；
+        // 统计改由 HotQuestionStatistics 呈现热度/回答/关注（对齐安卓上游问题卡的详情行）。
+        FeedContentSummary({
+          target: item.feedItem.target,
+          showStatistics: this.source !== ChannelFeedSource.HOT,
+          showAuthor: this.source !== ChannelFeedSource.HOT
+        })
         if (this.showFeedThumbnail && (item.feedItem.target.thumbnailUrl ?? '').length > 0) {
           Image(item.feedItem.target.thumbnailUrl)
             .width('100%')
