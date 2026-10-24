@@ -114,8 +114,9 @@ export struct ChannelFeedPage {
 
   aboutToAppear(): void {
     this.pageActive = true;
-    // 登记给根 HdsNavigation 做 bindToScrollable：驱动标题栏滚动模糊。
-    topLevelScrollRegistry.register(this.listScroller);
+    // 登记给根 HdsNavigation 做 bindToScrollable：驱动标题栏滚动模糊（以 source 为页签标识，
+    // 根标题栏只绑定当前可见页签，关注页两个子页签因此不会互相带出模糊）。
+    topLevelScrollRegistry.register(this.source, this.listScroller);
     // 覆盖式顶栏：Refresh 头部从页面顶端展开，把刷新圆圈绘制偏移到悬浮标题栏下沿
     this.indicator = new FeedPullDownIndicatorHost(this.getUIContext(), floatingTitleBarOffset());
     // P3-7：返回栈重显（页面实例与状态保留）时 aboutToAppear 可能再次触发；
@@ -310,6 +311,11 @@ export struct ChannelFeedPage {
               }
             })
             .scrollBar(BarState.Off)
+            // 容器挂到组件后再登记一次：aboutToAppear 时 Scroller 还没挂上组件，
+            // 根标题栏绑定它拿不到偏移，必须等挂载后才能建立订阅。
+            .onAppear((): void => {
+              topLevelScrollRegistry.register(this.source, this.listScroller);
+            })
           .height('100%')
           .edgeEffect(EdgeEffect.Spring)
           .onReachEnd(() => this.controller?.loadMore())

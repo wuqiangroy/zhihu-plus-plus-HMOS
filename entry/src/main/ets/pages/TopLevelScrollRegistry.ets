@@ -3,24 +3,36 @@
  *
  * HdsNavigation 需要经 `bindToScrollable` 绑定可滚动容器，才知道内容区的滚动偏移，
  * 进而驱动标题栏的滚动模糊（华为官方「HdsNavigation 嵌套 HdsTabs 滚动模糊丢失」
- * 解决方案口径）。各页签页各自持有 Scroller，这里统一登记，AppShell 取快照后
- * 传给 `bindToScrollable`。
+ * 解决方案口径）。各页签页各自持有 Scroller，这里按“所属页签”登记。
+ *
+ * 根标题栏是所有页签共用的一个，必须只绑定当前可见页签的滚动容器：若把全部页签的
+ * 容器一起绑定，在某一页滚动后，切到其他页（那些页偏移为 0、不会再发滚动事件）时
+ * 标题栏会继续保持模糊，出现“别的页什么都没滚，顶栏却糊着”的问题。
  */
-export class TopLevelScrollRegistry {
-  private readonly scrollers: Array<Scroller> = [];
+export const HOME_FEED_SCROLL_KEY: string = 'home';
+export const SETTINGS_SCROLL_KEY: string = 'settings';
 
-  /** 登记页签页的滚动容器；重复登记同一实例不重复入表。 */
-  register(scroller: Scroller): void {
-    if (this.scrollers.indexOf(scroller) >= 0) {
-      return;
-    }
-    this.scrollers.push(scroller);
-    // 跨组件通信走 AppStorage 广播（@Provide/@Consume 在 HdsTabs 树下实测不链接）。
+export class TopLevelScrollRegistry {
+  private readonly scrollers: Map<string, Scroller> = new Map<string, Scroller>();
+
+  /** 登记某页签的滚动容器（key 用页签标识，频道页直接用自己的 source）；同 key 覆盖。 */
+  register(key: string, scroller: Scroller): void {
+    this.scrollers.set(key, scroller);
+    // 每次登记都广播：页面挂载完成后会再登记一次（aboutToAppear 时容器还没挂到组件上，
+    // 那时绑定会丢失订阅），AppShell 需按新状态重算绑定。
     AppStorage.setOrCreate('topLevelScrollableTick', (AppStorage.get<number>('topLevelScrollableTick') ?? 0) + 1);
   }
 
-  snapshot(): Array<Scroller> {
-    return this.scrollers.slice(0);
+  /** 按页签标识取滚动容器；尚未挂载的页签会被跳过。 */
+  scrollersFor(keys: string[]): Array<Scroller> {
+    const result: Array<Scroller> = [];
+    for (const key of keys) {
+      const scroller: Scroller | undefined = this.scrollers.get(key);
+      if (scroller !== undefined) {
+        result.push(scroller);
+      }
+    }
+    return result;
   }
 }
 
