@@ -32,7 +32,7 @@
 
 | 首页（宽屏两列） | 热榜（宽屏两列） | 日报（宽屏两列） |
 | --- | --- | --- |
-| ![首页宽屏两列](docs/ui-screenshots/homepage_wide_screen.jpg) | ![热榜宽屏两列](docs/ui-screenshots/hot_wide_screen.jpg) | ![日报宽屏两列](docs/ui-screenshots/daily_wide_screen.jpg) |
+| ![首页宽屏两列](assets/images/6_wide_screen_homepage.jpg) | ![热榜宽屏两列](assets/images/7_wide_screen_hot.jpg) | ![日报宽屏两列](assets/images/8_wide_screen_daily.jpg) |
 
 ## 已实现功能
 
