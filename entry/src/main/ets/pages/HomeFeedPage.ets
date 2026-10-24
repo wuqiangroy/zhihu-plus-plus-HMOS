@@ -33,6 +33,7 @@ import {
 } from './AppPageChrome';
 import { HomeFeedController, HomeFeedPhase, HomeFeedViewState } from './HomeFeedState';
 import { HomeFeedMenuAction, HomeFeedMenuItem, homeFeedMenuItems, resolveHomeFeedBlockUser, resolveHomeFeedTopics } from './HomeFeedMenuState';
+import { topLevelScrollRegistry } from './TopLevelScrollRegistry';
 import { DraggableRefreshButton } from './components/DraggableRefreshButton';
 
 @Component
@@ -94,14 +95,16 @@ export struct HomeFeedPage {
   private readonly reportedTouchIdentities: Set<string> = new Set<string>();
   private readonly listScroller: Scroller = new Scroller();
   @State @Watch('rebuildFlowLayout') private feedWidthVp: number = 0;
-  // 顶栏下沿实测值晚于首帧到达（AppShell 根顶栏 onAreaChange 回填），变化时重算首屏让位
-  @StorageProp('titleBarBottomVp') @Watch('rebuildFlowLayout') private titleBarBottomVp: number = 0;
+  // 状态栏高度（vp）晚于首帧到达时重算首屏让位（让位 = 状态栏 + 顶栏 56vp）
+  @StorageProp('statusBarHeightVp') @Watch('rebuildFlowLayout') private statusBarHeightVp: number = 0;
   @State private flowSections: WaterFlowSections = new WaterFlowSections();
   @State private flowLayout: FeedFlowLayout = buildFeedFlowLayout([], [], 1, 0, false, 0, floatingTitleBarOffset());
   private firstVisibleIndex: number = 0;
   private feedHeightVp: number = 0;
 
   aboutToAppear(): void {
+    // 登记给根 HdsNavigation 做 bindToScrollable：驱动标题栏滚动模糊。
+    topLevelScrollRegistry.register(this.listScroller);
     // 覆盖式顶栏：Refresh 头部从页面顶端展开，把刷新圆圈绘制偏移到悬浮标题栏下沿
     this.indicator = new FeedPullDownIndicatorHost(this.getUIContext(), floatingTitleBarOffset());
     // P3-7：返回栈重显（页面实例与状态保留）时 aboutToAppear 可能再次触发；

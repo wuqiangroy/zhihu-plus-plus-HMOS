@@ -63,13 +63,14 @@ import {
   startupDestinationChannel,
   StartupDestinationListener
 } from 'core';
-import { AppNavigationRow, FLOATING_TITLE_BAR_OFFSET, floatingTitleBarOffset } from './AppPageChrome';
+import { AppNavigationRow, floatingTitleBarOffset } from './AppPageChrome';
+import { topLevelScrollRegistry } from './TopLevelScrollRegistry';
 import {
   TopLevelTab,
   topLevelTabForDestination
 } from './TopLevelTabs';
 import { DividerShowType, hdsMaterial, HdsNavDestination, HdsNavigation, HdsNavigationAttribute, HdsNavigationTitleMode, HdsTabsController } from '@kit.UIDesignKit';
-import { getChatTitleBarStyle, getImmersiveTitleBarStyle, getPersistentImmersiveTitleBarStyle } from '../common/style/NavStyles';
+import { getChatTitleBarStyle, getImmersiveTitleBarStyle, getPersistentImmersiveTitleBarStyle, getRootChromeTitleBarStyle } from '../common/style/NavStyles';
 import {
   decodeImmersiveMaterialSupport,
   ImmersiveMaterialSupportState
@@ -202,9 +203,10 @@ export struct AppShell {
   // （标题栏点选写 tick，关注页滑动写 index），@Consume 在 HdsTabs 树下实测不链接。
   @StorageProp('followingSelectedTabIndex') private followingTitleSelectedIndex: number = 0;
   @StorageProp('dailyViewingDate') private dailyViewingDate: string = '';
-  // 根顶栏下沿实测值（vp）：标题栏内容经 onAreaChange 回填，供各页首屏让位与设置页
-  // 顶部内缩使用，避免固定 94vp 在状态栏更高的设备上短几个 vp。
-  @StorageProp('titleBarBottomVp') private titleBarBottomVp: number = 0;
+  // HDS 绑定页签页的滚动容器后才会驱动标题栏滚动模糊（官方样例口径）；
+  // 页签页登记完经 AppStorage 广播，这里取快照传给 bindToScrollable。
+  @StorageProp('topLevelScrollableTick') @Watch('refreshBoundScrollers') private topLevelScrollableTick: number = 0;
+  @State private boundScrollers: Array<Scroller> = [];
   @State private dailyDateCursor: string = '';
   @Provide('channelFeedInteractionBridge') private channelFeedInteractionBridge: ChannelFeedInteractionBridge =
     new ChannelFeedInteractionBridge();
@@ -236,9 +238,17 @@ export struct AppShell {
   /** 沉浸光感偏好唯一写入入口（aboutToAppear 创建）：复用 store 串行 saveQueue，
    * 快速切换最终保存最后一次选择；设置页退出后由本组件继续完成保存。 */
   private immersiveMaterialStore: AppPreferencesStore | undefined = undefined;
+  /** “我的”页滚动容器：同样登记给根 HdsNavigation，滚动时顶栏才会出模糊。 */
+  private readonly settingsScroller: Scroller = new Scroller();
+
+  private refreshBoundScrollers(): void {
+    this.boundScrollers = topLevelScrollRegistry.snapshot();
+  }
 
   aboutToAppear(): void {
     this.themeMounted = true;
+    topLevelScrollRegistry.register(this.settingsScroller);
+    this.refreshBoundScrollers();
     // 主题恢复完成前先按跟随系统广播（EntryAbility.onConfigurationUpdate 依赖该键判断是否联动公式换色）。
     AppStorage.setOrCreate('appThemeMode', AppThemeMode.SYSTEM);
     AppStorage.setOrCreate('formulaForegroundColor', this.resolveFormulaForegroundColor(AppThemeMode.SYSTEM));
@@ -1049,10 +1059,9 @@ export struct AppShell {
       }
     }
     .titleBar({
-      // 首页/关注/热榜/日报的根顶栏要走常驻沉浸样式：滚动效果（enableScrollEffect）那条
-      // 渲染路径在本机型上只出滚动态底色、不出模糊，表现为「一滑动顶栏模糊就消失」。
-      // 常驻样式与回答/文章详情页一致（材质常驻、滚动时不切换底色），实测有模糊。
-      style: getPersistentImmersiveTitleBarStyle(this.immersiveMaterialMode(), this.immersiveMaterialSupportState()),
+      // 对齐华为原生应用的沉浸光感标题栏：支持 IMMERSIVE 材质的设备走材质 + 渐变模糊，
+      // 不支持的设备（含模拟器）降级为均匀模糊 + 半透明底；两条路径让位一致。
+      style: getRootChromeTitleBarStyle(this.immersiveMaterialMode(), this.immersiveMaterialSupportState()),
       avoidLayoutSafeArea: true,
       content: {
         stackBuilder: (): void => this.rootTitleBarContent(),
@@ -1063,10 +1072,15 @@ export struct AppShell {
     .hideBackButton(true)
     .mode(NavigationMode.Stack)
     .monopolizeEvents(false)
+    // 标题栏模糊需要导航组件知道内容区滚动偏移；未绑定时滚动态样式不生效，
+    // 透明顶栏会直接压出未模糊的内容（官方解决方案口径）。
+    .bindToScrollable(this.boundScrollers)
     .navDestination(this.destinationBuilder)
     .backgroundColor($r('app.color.page_background'))
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-    .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.BOTTOM])
+    // 顶栏透明后模糊层只跟随标题栏自身区域；TOP 也纳入 ignoreLayoutSafeArea 后，
+    // 模糊才继续铺到状态栏区域（官方问答口径），否则状态栏那段内容不模糊。
+    .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
   }
 
   @Builder
@@ -1410,16 +1424,6 @@ export struct AppShell {
     .width('100%')
     .height('100%')
     .monopolizeEvents(false)
-    // 实测顶栏下沿（全局 y + 内容高度，vp）：各页首屏让位改用实测值，
-    // 固定 94vp 在状态栏或标题栏更高的设备上会让内容压进玻璃几个 vp。
-    .onAreaChange((_oldValue: Area, newValue: Area): void => {
-      const top: number = Number(newValue.globalPosition.y ?? 0);
-      const height: number = Number(newValue.height ?? 0);
-      const bottom: number = top + height;
-      if (bottom > 0 && Math.abs(bottom - this.titleBarBottomVp) > 0.5) {
-        AppStorage.setOrCreate('titleBarBottomVp', bottom);
-      }
-    })
   }
 
   // 关注子页签：鸿蒙规范的文字页签（选中加重 + 短下划线指示条），
@@ -1475,7 +1479,7 @@ export struct AppShell {
   @Builder
   settingsPage() {
     Stack({ alignContent: Alignment.TopStart }) {
-      Scroll() {
+      Scroll(this.settingsScroller) {
         Column({ space: $r('app.float.spacing_large') }) {
           this.accountOverview()
           this.accountQuickActions()
@@ -1615,8 +1619,8 @@ export struct AppShell {
       .padding({
         left: $r('app.float.page_padding'),
         right: $r('app.float.page_padding'),
-        // 与信息流一致按实测顶栏下沿让位：固定 94vp 在折叠屏/平板上会让头像压到顶栏下沿以内。
-        top: Math.max(FLOATING_TITLE_BAR_OFFSET, this.titleBarBottomVp),
+        // 与信息流一致：状态栏 + HDS 标题栏自身高度。
+        top: floatingTitleBarOffset(),
         // HdsTabs 的悬浮底栏会覆盖滚动区末端；为最后一个设置项预留可点击空间。
         bottom: 96
       })

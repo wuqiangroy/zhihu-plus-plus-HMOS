@@ -30,17 +30,19 @@ export enum AppPageStatusKind {
  */
 export const FLOATING_TITLE_BAR_OFFSET: number = 94;
 
+/** HDS 标题栏自身高度（vp）：首屏让位 = 状态栏高度 + 该值。 */
+export const ROOT_TITLE_BAR_CONTENT_HEIGHT: number = 56;
+
 /**
- * 顶栏让位高度（vp）：优先用实际测得的顶栏下沿，测不到时回退到固定常量。
+ * 顶栏让位高度（vp）：状态栏高度 + HDS 标题栏自身高度（56vp），按固定常量兜底。
  *
- * 固定常量按 38vp 状态栏估算；顶栏改为常驻材质后，状态栏或标题栏更高的设备上
- * 首屏内容会压进顶栏下沿几个 vp，表现为首卡/头像被玻璃压住、顶栏第二行文字与
- * 列表首项叠在一起。AppShell 根顶栏内容经 onAreaChange 实测 globalPosition+height，
- * 写入 AppStorage 的 titleBarBottomVp。
+ * 根顶栏已按华为官方样例改成「透明底 + HDS 自带滚动模糊」，玻璃只在标题栏自身
+ * 高度内生效，因此让位不再跟随标题栏下方那段模糊蒙层（maskExtraHeight，默认
+ * 32vp），内容可以像系统应用一样紧贴顶栏下沿。
  */
 export function floatingTitleBarOffset(): number {
-  const measured: number = AppStorage.get<number>('titleBarBottomVp') ?? 0;
-  return Math.max(FLOATING_TITLE_BAR_OFFSET, measured);
+  const statusBar: number = AppStorage.get<number>('statusBarHeightVp') ?? 0;
+  return Math.max(FLOATING_TITLE_BAR_OFFSET, statusBar + ROOT_TITLE_BAR_CONTENT_HEIGHT);
 }
 
 /** 加载更多时给悬浮底栏及系统手势区留出空间，圆圈完整停在底栏上方。 */
