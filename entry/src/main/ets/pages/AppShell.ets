@@ -1096,13 +1096,17 @@ export struct AppShell {
         controller: this.tabsController,
         onTabDoubleTap: (index: number): void => {
           // 双击页签刷新对应 feed（“我的”除外）；跨页面信号经 AppStorage 广播。
+          // 先广播回到顶部、再广播刷新：滑动数据时双击也按“先回顶 → 再刷新”执行。
           const tab = this.tabAtDisplayIndex(index);
           if (tab < TopLevelTab.HOME || tab > TopLevelTab.DAILY) {
             return;
           }
+          AppStorage.setOrCreate('tabScrollTopTabIndex', tab);
+          AppStorage.setOrCreate('tabScrollTopTick', (AppStorage.get<number>('tabScrollTopTick') ?? 0) + 1);
+          // 先写目标页签再自增 tick：@Watch 在 tick 写入时同步触发，顺序反了会读到上一次的目标页签。
+          AppStorage.setOrCreate('tabRefreshTabIndex', tab);
           const nextTick = (AppStorage.get<number>('tabRefreshTick') ?? 0) + 1;
           AppStorage.setOrCreate('tabRefreshTick', nextTick);
-          AppStorage.setOrCreate('tabRefreshTabIndex', tab);
         },
         onCurrentTabTap: (index: number): void => {
           const tab = this.tabAtDisplayIndex(index);
