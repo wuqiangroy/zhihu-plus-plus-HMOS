@@ -32,7 +32,7 @@ import {
   AppPageStatusPanel,
   FeedLoadMoreIndicator,
   FeedPullDownIndicatorHost,
-  FLOATING_TITLE_BAR_OFFSET
+  floatingTitleBarOffset
 } from './AppPageChrome';
 import {
   ChannelFeedController,
@@ -103,8 +103,10 @@ export struct ChannelFeedPage {
   private pendingBlockItem?: ChannelContentItem = undefined;
   private readonly listScroller: Scroller = new Scroller();
   @State @Watch('rebuildFlowLayout') private feedWidthVp: number = 0;
+  // 顶栏下沿实测值晚于首帧到达（AppShell 根顶栏 onAreaChange 回填），变化时重算首屏让位
+  @StorageProp('titleBarBottomVp') @Watch('rebuildFlowLayout') private titleBarBottomVp: number = 0;
   @State private flowSections: WaterFlowSections = new WaterFlowSections();
-  @State private flowLayout: FeedFlowLayout = buildFeedFlowLayout([], [], 1, 0, false, 0, FLOATING_TITLE_BAR_OFFSET);
+  @State private flowLayout: FeedFlowLayout = buildFeedFlowLayout([], [], 1, 0, false, 0, floatingTitleBarOffset());
   private firstVisibleIndex: number = 0;
   private handledDateSelectionTick: number = 0;
   private pageActive: boolean = false;
@@ -112,7 +114,7 @@ export struct ChannelFeedPage {
   aboutToAppear(): void {
     this.pageActive = true;
     // 覆盖式顶栏：Refresh 头部从页面顶端展开，把刷新圆圈绘制偏移到悬浮标题栏下沿
-    this.indicator = new FeedPullDownIndicatorHost(this.getUIContext(), FLOATING_TITLE_BAR_OFFSET);
+    this.indicator = new FeedPullDownIndicatorHost(this.getUIContext(), floatingTitleBarOffset());
     // P3-7：返回栈重显（页面实例与状态保留）时 aboutToAppear 可能再次触发；
     // 控制器仍存活时直接复用，避免重建控制器并重载列表导致滚动位置丢失。
     if (this.controller !== undefined) {
@@ -777,7 +779,7 @@ export struct ChannelFeedPage {
     this.flowLayout = buildFeedFlowLayout(
       this.items.map((item: ChannelFeedItem): string => channelFeedItemIdentity(item)),
       this.items.map((item: ChannelFeedItem): string => item.kind === ChannelFeedItemKind.DAILY_STORY ? item.story.date : ''),
-      columns, leading, this.loadingMore, gap, FLOATING_TITLE_BAR_OFFSET);
+      columns, leading, this.loadingMore, gap, floatingTitleBarOffset());
     this.flowSections.splice(0, this.flowSections.length(), this.flowLayout.sections);
   }
 

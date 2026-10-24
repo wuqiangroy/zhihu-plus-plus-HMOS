@@ -63,7 +63,7 @@ import {
   startupDestinationChannel,
   StartupDestinationListener
 } from 'core';
-import { AppNavigationRow } from './AppPageChrome';
+import { AppNavigationRow, FLOATING_TITLE_BAR_OFFSET, floatingTitleBarOffset } from './AppPageChrome';
 import {
   TopLevelTab,
   topLevelTabForDestination
@@ -202,6 +202,9 @@ export struct AppShell {
   // （标题栏点选写 tick，关注页滑动写 index），@Consume 在 HdsTabs 树下实测不链接。
   @StorageProp('followingSelectedTabIndex') private followingTitleSelectedIndex: number = 0;
   @StorageProp('dailyViewingDate') private dailyViewingDate: string = '';
+  // 根顶栏下沿实测值（vp）：标题栏内容经 onAreaChange 回填，供各页首屏让位与设置页
+  // 顶部内缩使用，避免固定 94vp 在状态栏更高的设备上短几个 vp。
+  @StorageProp('titleBarBottomVp') private titleBarBottomVp: number = 0;
   @State private dailyDateCursor: string = '';
   @Provide('channelFeedInteractionBridge') private channelFeedInteractionBridge: ChannelFeedInteractionBridge =
     new ChannelFeedInteractionBridge();
@@ -1046,7 +1049,10 @@ export struct AppShell {
       }
     }
     .titleBar({
-      style: getImmersiveTitleBarStyle(this.immersiveMaterialMode(), this.immersiveMaterialSupportState()),
+      // 首页/关注/热榜/日报的根顶栏要走常驻沉浸样式：滚动效果（enableScrollEffect）那条
+      // 渲染路径在本机型上只出滚动态底色、不出模糊，表现为「一滑动顶栏模糊就消失」。
+      // 常驻样式与回答/文章详情页一致（材质常驻、滚动时不切换底色），实测有模糊。
+      style: getPersistentImmersiveTitleBarStyle(this.immersiveMaterialMode(), this.immersiveMaterialSupportState()),
       avoidLayoutSafeArea: true,
       content: {
         stackBuilder: (): void => this.rootTitleBarContent(),
@@ -1404,6 +1410,16 @@ export struct AppShell {
     .width('100%')
     .height('100%')
     .monopolizeEvents(false)
+    // 实测顶栏下沿（全局 y + 内容高度，vp）：各页首屏让位改用实测值，
+    // 固定 94vp 在状态栏或标题栏更高的设备上会让内容压进玻璃几个 vp。
+    .onAreaChange((_oldValue: Area, newValue: Area): void => {
+      const top: number = Number(newValue.globalPosition.y ?? 0);
+      const height: number = Number(newValue.height ?? 0);
+      const bottom: number = top + height;
+      if (bottom > 0 && Math.abs(bottom - this.titleBarBottomVp) > 0.5) {
+        AppStorage.setOrCreate('titleBarBottomVp', bottom);
+      }
+    })
   }
 
   // 关注子页签：鸿蒙规范的文字页签（选中加重 + 短下划线指示条），
@@ -1599,7 +1615,8 @@ export struct AppShell {
       .padding({
         left: $r('app.float.page_padding'),
         right: $r('app.float.page_padding'),
-        top: 94,
+        // 与信息流一致按实测顶栏下沿让位：固定 94vp 在折叠屏/平板上会让头像压到顶栏下沿以内。
+        top: Math.max(FLOATING_TITLE_BAR_OFFSET, this.titleBarBottomVp),
         // HdsTabs 的悬浮底栏会覆盖滚动区末端；为最后一个设置项预留可点击空间。
         bottom: 96
       })

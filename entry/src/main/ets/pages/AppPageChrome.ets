@@ -30,6 +30,19 @@ export enum AppPageStatusKind {
  */
 export const FLOATING_TITLE_BAR_OFFSET: number = 94;
 
+/**
+ * 顶栏让位高度（vp）：优先用实际测得的顶栏下沿，测不到时回退到固定常量。
+ *
+ * 固定常量按 38vp 状态栏估算；顶栏改为常驻材质后，状态栏或标题栏更高的设备上
+ * 首屏内容会压进顶栏下沿几个 vp，表现为首卡/头像被玻璃压住、顶栏第二行文字与
+ * 列表首项叠在一起。AppShell 根顶栏内容经 onAreaChange 实测 globalPosition+height，
+ * 写入 AppStorage 的 titleBarBottomVp。
+ */
+export function floatingTitleBarOffset(): number {
+  const measured: number = AppStorage.get<number>('titleBarBottomVp') ?? 0;
+  return Math.max(FLOATING_TITLE_BAR_OFFSET, measured);
+}
+
 /** 加载更多时给悬浮底栏及系统手势区留出空间，圆圈完整停在底栏上方。 */
 @Component
 export struct FeedLoadMoreIndicator {
