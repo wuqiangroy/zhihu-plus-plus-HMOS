@@ -32,7 +32,10 @@ import {
   AppPageStatusPanel,
   FeedLoadMoreIndicator,
   FeedPullDownIndicatorHost,
-  floatingTitleBarOffset
+  floatingTitleBarOffset,
+  PULL_REFRESH_PULL_DOWN_RATIO,
+  PULL_REFRESH_TRIGGER_OFFSET_VP,
+  pullDownRefreshPlaceholder
 } from './AppPageChrome';
 import {
   ChannelFeedController,
@@ -47,6 +50,9 @@ import { DraggableRefreshButton } from './components/DraggableRefreshButton';
 import { topLevelScrollRegistry } from './TopLevelScrollRegistry';
 import { getAbilityContext } from '../entryability/AbilityContextHolder';
 import { Want } from '@kit.AbilityKit';
+
+/** 下拉头回弹/收起后的静默窗口（ms）：期间再往下滑不触发刷新。 */
+const REFRESH_SETTLE_QUIET_MS: number = 500;
 
 @Component
 export struct ChannelFeedPage {
@@ -115,6 +121,10 @@ export struct ChannelFeedPage {
   private firstVisibleIndex: number = 0;
   private handledDateSelectionTick: number = 0;
   private pageActive: boolean = false;
+  /** 本次手势按下时列表是否已在顶部：只有顶部起手才算有意下拉刷新。 */
+  private pullGestureFromTop: boolean = true;
+  /** 下拉头最近一次回弹/收起的时刻：此后的短静默期内不响应下拉刷新。 */
+  private lastRefreshSettleTime: number = 0;
 
   aboutToAppear(): void {
     this.pageActive = true;
@@ -246,6 +256,7 @@ export struct ChannelFeedPage {
       } else {
         Refresh({
           refreshing: this.refreshing,
+          builder: pullDownRefreshPlaceholder,
           refreshingContent: this.indicator?.view()
         }) {
           WaterFlow({ scroller: this.listScroller, sections: this.flowSections,
@@ -320,6 +331,13 @@ export struct ChannelFeedPage {
                 AppStorage.setOrCreate('bottomBarHiddenByScroll', offset > 0);
               }
             })
+            // 记录手势起手时是否在顶部：从列表中间回滑到顶部后继续下拉的过冲
+            // 也会被 Refresh 判成下拉刷新，需要据此区分。
+            .onTouch((event: TouchEvent): void => {
+              if (event.type === TouchType.Down) {
+                this.pullGestureFromTop = this.listScroller.currentOffset().yOffset <= 1;
+              }
+            })
             .scrollBar(BarState.Off)
             // 容器挂到组件后再登记一次：aboutToAppear 时 Scroller 还没挂上组件，
             // 根标题栏绑定它拿不到偏移，必须等挂载后才能建立订阅。
@@ -341,10 +359,35 @@ export struct ChannelFeedPage {
         }
         .width('100%')
         .layoutWeight(1)
+        // 官方属性（offset/friction 已于 API 11 废弃）：把刷新阈值抬到明显高于普通回弹，
+        // 普通下拉只回弹、不刷新；需要下拉约半屏高才触发。
+        .refreshOffset(PULL_REFRESH_TRIGGER_OFFSET_VP)
+        .pullDownRatio(PULL_REFRESH_PULL_DOWN_RATIO)
         .onRefreshing((): void => {
+          // 程序化刷新（双击页签/热榜按钮）把 refreshing 置 true 时也会回调本事件：
+          // 此时控制器已在刷新，再调 refresh() 会排队一次重复请求（表现为刷新两轮）。
+          if (this.refreshing) {
+            return;
+          }
+          // 回弹/下拉头收起后的短时间内不响应下拉：拉到顶回弹时再往下滑不应触发刷新。
+          if (Date.now() - this.lastRefreshSettleTime <= REFRESH_SETTLE_QUIET_MS) {
+            this.suppressPullRefresh();
+            return;
+          }
+          // 非顶部起手（回滑到顶后继续下拉的过冲）同样不刷新。
+          if (!this.pullGestureFromTop) {
+            this.suppressPullRefresh();
+            return;
+          }
           this.controller?.refresh();
         })
-        .onStateChange((status: RefreshStatus): void => this.indicator?.onStateChange(status))
+        .onStateChange((status: RefreshStatus): void => {
+          this.indicator?.onStateChange(status);
+          // 下拉头回到 Inactive、或一次刷新收尾（Done）都算“回弹/收起”，记录时刻用于静默。
+          if (status === RefreshStatus.Inactive || status === RefreshStatus.Done) {
+            this.lastRefreshSettleTime = Date.now();
+          }
+        })
       }
 
       if (this.blockingMessage.length > 0) {
@@ -855,6 +898,14 @@ export struct ChannelFeedPage {
       this.items.map((item: ChannelFeedItem): string => item.kind === ChannelFeedItemKind.DAILY_STORY ? item.story.date : ''),
       columns, leading, this.loadingMore, gap);
     this.flowSections.splice(0, this.flowSections.length(), this.flowLayout.sections);
+  }
+
+  /** 忽略本次下拉：Refresh 已自行进入刷新态，短暂置 true 再复位让它收起，不发起请求。 */
+  private suppressPullRefresh(): void {
+    this.refreshing = true;
+    setTimeout((): void => {
+      this.refreshing = false;
+    }, 80);
   }
 
   private applyState(state: ChannelFeedViewState): void {
