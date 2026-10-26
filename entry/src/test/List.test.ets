@@ -1,4 +1,5 @@
 import feedWaterfallLayoutTest from './FeedWaterfallLayout.test';
+import feedFlowDataSourceTest from './FeedFlowDataSource.test';
 import continuousAnswerLifecycleTest from './ContinuousAnswerLifecycle.test';
 import continuousReferenceNavigatorTest from './ContinuousReferenceNavigator.test';
 import homeFeedMenuStateTest from './HomeFeedMenuState.test';
@@ -104,6 +105,7 @@ import continuousAnswerStateTest from './ContinuousAnswerState.test';
 
 export default function testsuite(): void {
   feedWaterfallLayoutTest();
+  feedFlowDataSourceTest();
   apiLevelTest();
   backgroundWorkPolicyTest();
   cookieSessionTest();

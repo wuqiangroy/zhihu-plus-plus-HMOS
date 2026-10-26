@@ -499,8 +499,8 @@ export struct ReaderBlockView {
    */
   onBodySelectionActive?: (active: boolean) => void;
 
-  /** 正文 Text 的双击识别器：开启选词的 Text 会吞掉手势系统事件，只能靠 onTouch 自行识别。 */
-  private readonly bodyTapDetector: DoubleTapDetector = new DoubleTapDetector();
+  /** 正文双击识别器；宿主可传入文档共享实例，以便列表滚动时统一抑制双击。 */
+  bodyTapDetector: DoubleTapDetector = new DoubleTapDetector();
   /** 正文当前是否存在选区：onTextSelectionChange 回填去重，仅作信号，不参与渲染。 */
   private bodySelectionActive: boolean = false;
   /**

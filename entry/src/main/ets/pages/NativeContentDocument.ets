@@ -43,6 +43,7 @@ import {
   readerPositionTargetY
 } from './ReaderPositionAnchor';
 import { LinkCardMetaLoader, ReaderBlockView } from './ReaderBlockView';
+import { DoubleTapDetector } from './DoubleTapDetector';
 
 /**
  * 块高缺失时的估算兜底（vp）：未渲染块按实测平均块高估，无实测值时用该值。
@@ -387,6 +388,7 @@ export struct ContentImagePreview {
 
 @Component
 export struct NativeContentDocument {
+  private readonly bodyTapDetector: DoubleTapDetector = new DoubleTapDetector();
   html: string = '';
   /** 仅真实回答/文章传入；问题列表和相邻回答预览不读写进度。 */
   positionKey: string = '';
@@ -1248,6 +1250,7 @@ export struct NativeContentDocument {
   private readerBlock(item: ReaderBlock) {
     ReaderBlockView({
       item: item,
+      bodyTapDetector: this.bodyTapDetector,
       previousBlock: this.previousBlocks.get(item.id),
       segmentInfos: this.segmentInfos,
       linkCardMeta: this.linkCardMetas.get(item.sourceUrl),
