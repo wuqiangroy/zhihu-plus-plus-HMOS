@@ -27,6 +27,7 @@ import {
   contentStatistics,
   contentTitle,
   contentUpdatedAtText,
+  answerTitleFoldThreshold,
   formatContentDateTime
 } from '../main/ets/pages/ContentDetailPages';
 import { parseZhihuHtml, ReaderBlockKind, ReaderInlineKind } from 'reader';
@@ -40,6 +41,7 @@ class ControlledContentRepository implements ContentRepository {
   readonly pendingQuestions: Array<PendingQuestion> = [];
   cancelCount: number = 0;
   answer: Answer = answerFixture();
+  failAnswer: boolean = false;
   article: Article = articleFixture();
 
   getQuestion(_id: string): Promise<Question> {
@@ -49,8 +51,32 @@ class ControlledContentRepository implements ContentRepository {
     });
   }
 
-  getAnswer(_id: string): Promise<Answer> {
-    return Promise.resolve(this.answer);
+  getAnswer(id: string): Promise<Answer> {
+    if (this.failAnswer) { return Promise.reject(new Error('network')); }
+    // 按请求的 id 返回浅拷贝：提交校验要求候选详情与已登记的目标回答一致，
+    // 同时不得就地改写已显示正文引用的对象。
+    const source = this.answer;
+    const answer: Answer = {
+      id: id,
+      questionId: source.questionId,
+      questionTitle: source.questionTitle,
+      contentHtml: source.contentHtml,
+      excerpt: source.excerpt,
+      url: source.url,
+      voteupCount: source.voteupCount,
+      commentCount: source.commentCount,
+      createdAt: source.createdAt,
+      updatedAt: source.updatedAt,
+      author: source.author,
+      voteState: source.voteState,
+      thanksCount: source.thanksCount,
+      isThanked: source.isThanked,
+      endorsements: source.endorsements,
+      ipInfo: source.ipInfo,
+      segmentInfos: source.segmentInfos,
+      allowSegmentInteraction: source.allowSegmentInteraction
+    };
+    return Promise.resolve(answer);
   }
 
   getArticle(_id: string): Promise<Article> {
@@ -89,6 +115,84 @@ class HttpFailingContentRepository implements ContentRepository {
 
 export default function contentDetailStateTest(): void {
   describe('contentDetailStateTest', () => {
+    it('preparesAnswerWithoutReplacingCurrentAndRejectsStaleCommit', 0, async () => {
+      const repository = new ControlledContentRepository();
+      const controller = new ContentDetailController(repository);
+      controller.activate();
+      await controller.load(ContentDetailKind.ANSWER, '2');
+      const original = controller.snapshot().content;
+      repository.failAnswer = true;
+      expect(await controller.prepareAnswer('3') === undefined).assertTrue();
+      expect(controller.snapshot().content?.loadGeneration).assertEqual(original?.loadGeneration);
+      expect(controller.preparedAnswerError().length > 0).assertTrue();
+      repository.failAnswer = false;
+      const prepared = await controller.prepareAnswer('3');
+      expect(controller.snapshot().phase).assertEqual(ContentDetailPhase.READY);
+      expect(controller.snapshot().content?.loadGeneration).assertEqual(original?.loadGeneration);
+      expect(prepared !== undefined).assertTrue();
+      if (prepared === undefined) { return; }
+      controller.deactivate();
+      expect(controller.commitPreparedAnswer(prepared)).assertFalse();
+      controller.activate();
+      const next = await controller.prepareAnswer('3');
+      if (next === undefined) { expect(false).assertTrue(); return; }
+      expect(controller.commitPreparedAnswer(next)).assertTrue();
+      expect(controller.commitPreparedAnswer(next)).assertFalse();
+      expect(controller.snapshot().content?.loadGeneration).assertEqual(next.loadGeneration);
+      controller.deactivate();
+    });
+    it('adoptsPrefetchedAnswerWithoutReplacingCurrentAndCommitsOnce', 0, async () => {
+      const repository = new ControlledContentRepository();
+      const controller = new ContentDetailController(repository);
+      controller.activate();
+      await controller.load(ContentDetailKind.ANSWER, '2');
+      const original = controller.snapshot().content;
+      const prefetched = answerFixture();
+      prefetched.id = '3';
+      const admitted = controller.admitAnswer(prefetched);
+      // 登记候选不替换当前正文、不改变阶段。
+      expect(admitted !== undefined).assertTrue();
+      expect(controller.snapshot().content?.loadGeneration).assertEqual(original?.loadGeneration);
+      expect(controller.snapshot().phase).assertEqual(ContentDetailPhase.READY);
+      if (admitted === undefined) { return; }
+      expect(admitted.value.id).assertEqual('3');
+      expect(admitted.loadGeneration !== undefined).assertTrue();
+      expect(controller.commitPreparedAnswer(admitted)).assertTrue();
+      expect(controller.snapshot().content?.value.id).assertEqual('3');
+      // 同一候选不得重复提交。
+      expect(controller.commitPreparedAnswer(admitted)).assertFalse();
+      controller.deactivate();
+    });
+    it('rejectsCommitForCandidateOtherThanAdmitted', 0, async () => {
+      const repository = new ControlledContentRepository();
+      const controller = new ContentDetailController(repository);
+      controller.activate();
+      await controller.load(ContentDetailKind.ANSWER, '2');
+      const first = answerFixture();
+      first.id = '3';
+      const admittedFirst = controller.admitAnswer(first);
+      const other = answerFixture();
+      other.id = '4';
+      const admittedOther = controller.admitAnswer(other);
+      if (admittedFirst === undefined || admittedOther === undefined) {
+        expect(false).assertTrue();
+        return;
+      }
+      // 后一次登记使先前候选失效：手势取消后不得再提交旧候选。
+      expect(controller.commitPreparedAnswer(admittedFirst)).assertFalse();
+      expect(controller.commitPreparedAnswer(admittedOther)).assertTrue();
+      expect(controller.snapshot().content?.value.id).assertEqual('4');
+      controller.deactivate();
+    });
+    it('foldsAnswerTitleBarOnlyAfterHeaderIdentityScrollsOut', 0, () => {
+      // 折叠阈值必须覆盖「问题标题 + 答主行」：只按标题判定会让答主信息在正文仍可见时
+      // 就出现在顶栏，形成信息冗余（横向模式曾强制折叠，问题标题同样冗余）。
+      expect(answerTitleFoldThreshold(60, 0)).assertEqual(68);
+      expect(answerTitleFoldThreshold(60, 40)).assertEqual(60 + 18 + 40 + 8);
+      // 答主行未测得时退化到仅按标题判定；标题也未测得时用兜底阈值。
+      expect(answerTitleFoldThreshold(0, 40)).assertEqual(64);
+      expect(answerTitleFoldThreshold(0, 0)).assertEqual(64);
+    });
     it('acceptsNewDocumentEdgesWhileRejectingDepartedDocumentEvents', 0, () => {
       const oldDetail: LoadedAnswerDetail = { kind: ContentDetailKind.ANSWER, value: answerFixture(), loadGeneration: 1 };
       const newDetail: LoadedAnswerDetail = { kind: ContentDetailKind.ANSWER, value: answerFixture(), loadGeneration: 2 };

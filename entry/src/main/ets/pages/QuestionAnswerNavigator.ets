@@ -116,7 +116,20 @@ export class QuestionAnswerNavigator {
     this.controller.activate();
   }
 
-  async move(direction: number): Promise<string | undefined> {
+  /**
+   * 不触发分页的相邻答查询：用于手势期间预取/预挂载真实候选页。
+   * 目标仍在未加载分页时返回 undefined（此时只能等松手后由 prepareMove 补齐分页）。
+   */
+  peekId(direction: number): string | undefined {
+    if (!this.active || this.index < 0 || (direction !== -1 && direction !== 1)) { return undefined; }
+    const index = this.index + direction;
+    const state = this.controller.snapshot();
+    if (index < 0 || index >= state.items.length) { return undefined; }
+    const id = state.items[index].feedItem.target.id;
+    return id.length > 0 ? id : undefined;
+  }
+
+  async prepareMove(direction: number): Promise<string | undefined> {
     if (!this.active || this.busy || (direction !== -1 && direction !== 1)) {
       return undefined;
     }
@@ -129,12 +142,24 @@ export class QuestionAnswerNavigator {
       const nextIndex = this.index + direction;
       const item = this.controller.snapshot().items[nextIndex];
       if (item === undefined) { return undefined; }
-      this.index = nextIndex;
-      this.currentAnswerId = item.feedItem.target.id;
-      return this.currentAnswerId;
+      return item.feedItem.target.id;
     } finally {
       this.busy = false;
     }
+  }
+
+  commitMove(id: string): boolean {
+    if (!this.active) { return false; }
+    const index = this.controller.snapshot().items.findIndex((item): boolean => item.feedItem.target.id === id);
+    if (index < 0 || (this.index >= 0 && Math.abs(index - this.index) !== 1)) { return false; }
+    this.index = index;
+    this.currentAnswerId = id;
+    return true;
+  }
+
+  async move(direction: number): Promise<string | undefined> {
+    const id = await this.prepareMove(direction);
+    return id !== undefined && this.commitMove(id) ? id : undefined;
   }
 
   dispose(): void {

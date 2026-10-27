@@ -386,6 +386,8 @@ export struct ContentImagePreview {
   }
 }
 
+let mountedNativeDocuments: number = 0;
+
 @Component
 export struct NativeContentDocument {
   private readonly bodyTapDetector: DoubleTapDetector = new DoubleTapDetector();
@@ -394,6 +396,15 @@ export struct NativeContentDocument {
   positionKey: string = '';
   /** 导航目的地身份保持不变；在同一路由内切换回答时，保存键仍使用实际回答 ID。 */
   positionOwnerKey: string = '';
+  /** 单篇回答双实例共存时，只有已提交实例可写进度和响应翻页。 */
+  answerDocumentKey: string = '';
+  /** 候选正文（已预挂载、尚未提交）：按自己保存的位置预排版，但不写进度、不响应翻页、不广播折叠标题。 */
+  candidatePane: boolean = false;
+  @StorageProp('readerActiveAnswerDocument') @Watch('onPositionActiveChanged') private activeAnswerDocument: string = '';
+  onViewportPrepared?: () => void;
+  private viewportPreparedReported: boolean = false;
+  private headerHasLayout: boolean = false;
+  private registeredDocument: boolean = false;
   @StorageProp('readerActiveRouteKey') @Watch('onPositionActiveChanged') private positionVisibleOwner: string = '';
   @StorageProp('readerPositionFlushTick') @Watch('onPositionBackground') private positionFlushTick: number = 0;
   emptyMessage: string = '正文为空';
@@ -623,6 +634,10 @@ export struct NativeContentDocument {
   }
 
   aboutToAppear(): void {
+    if (!this.registeredDocument) {
+      this.registeredDocument = true;
+      mountedNativeDocuments += 1;
+    }
     const blocks = parseZhihuHtml(this.html);
     this.empty = blocks.length === 0;
     this.blocks = blocks;
@@ -631,7 +646,9 @@ export struct NativeContentDocument {
       this.previousBlocks.set(blocks[index].id, blocks[index - 1]);
     }
     this.dataSource.replace(blocks);
-    this.loadLinkCardMetas(blocks);
+    if (this.answerDocumentKey.length === 0 || this.positionIsActive()) {
+      this.loadLinkCardMetas(blocks);
+    }
     const plainLength = this.html.replace(/<[^>]*>/g, '').trim().length;
     this.collapsibleActive = this.collapsible && (plainLength >= 100 || this.html.includes('<img'));
     this.prepareReaderPosition();
@@ -663,12 +680,27 @@ export struct NativeContentDocument {
   }
 
   private positionIsActive(): boolean {
-    return this.positionOwnerKey.length > 0 && this.positionVisibleOwner === this.positionOwnerKey;
+    return this.positionOwnerKey.length > 0 && this.positionVisibleOwner === this.positionOwnerKey &&
+      (this.answerDocumentKey.length === 0 || this.activeAnswerDocument === this.answerDocumentKey);
+  }
+
+  /** 可执行位置恢复的主体：当前正文，或尚未提交但已预挂载的候选正文（不写回进度）。 */
+  private positionRestorable(): boolean {
+    return this.positionIsActive() || (this.candidatePane && this.positionOwnerKey.length > 0);
+  }
+
+  private reportViewportPrepared(): void {
+    if (!this.viewportPreparedReported && this.positionMounted && this.headerHasLayout &&
+      this.viewportWidthVp > 0 && this.viewportHeightVp > 0) {
+      this.viewportPreparedReported = true;
+      this.onViewportPrepared?.();
+    }
   }
 
   private schedulePositionRestore(layoutChanged: boolean = false): void {
     if (layoutChanged) { this.positionLayoutChanged = Date.now(); }
-    if (!this.positionMounted || !this.positionIsActive() || this.pendingPosition === undefined || this.viewportHeightVp <= 0 ||
+    if (!this.positionMounted || !this.positionRestorable() || this.pendingPosition === undefined ||
+      this.viewportHeightVp <= 0 ||
       this.viewportWidthVp <= 0 || this.positionRestoreTimer >= 0) { return; }
     this.positionRestoreTimer = setTimeout((): void => {
       this.positionRestoreTimer = -1;
@@ -678,7 +710,7 @@ export struct NativeContentDocument {
 
   private adjustReaderPosition(): void {
     const saved = this.pendingPosition;
-    if (!this.positionMounted || !this.positionIsActive() || saved === undefined) { return; }
+    if (!this.positionMounted || !this.positionRestorable() || saved === undefined) { return; }
     const now = Date.now();
     if (this.positionRestoreStarted === 0) { this.positionRestoreStarted = now; }
     const expired = now - this.positionRestoreStarted >= 8000;
@@ -739,6 +771,10 @@ export struct NativeContentDocument {
     const active = this.positionIsActive();
     const wasActive = this.positionWasActive;
     this.positionWasActive = active;
+    if (active && !wasActive && this.positionMounted && this.answerDocumentKey.length > 0 &&
+      this.linkCardMetaLoader === undefined) {
+      this.loadLinkCardMetas(this.blocks);
+    }
     if (!active && wasActive) {
       this.persistReaderPosition(true);
       if (this.positionSaveTimer >= 0) { clearTimeout(this.positionSaveTimer); }
@@ -862,7 +898,11 @@ export struct NativeContentDocument {
     this.positionSaveTimer = -1;
     this.linkCardMetaLoader?.dispose();
     this.linkCardMetaLoader = undefined;
-    clearFormulaByteCache();
+    if (this.registeredDocument) {
+      this.registeredDocument = false;
+      mountedNativeDocuments = Math.max(0, mountedNativeDocuments - 1);
+      if (mountedNativeDocuments === 0) { clearFormulaByteCache(); }
+    }
   }
 
   build() {
@@ -874,6 +914,8 @@ export struct NativeContentDocument {
             .padding({ bottom: this.readingLayout ? Math.max(0, 24 - this.blockSpacing()) : 0 })
             .onAreaChange((_oldArea: Area, newArea: Area): void => {
               this.reportChromeHeight('header', newArea);
+              this.headerHasLayout = Number(newArea.width) > 0 && Number(newArea.height) > 0;
+              this.reportViewportPrepared();
             })
           if (this.empty) {
             ListItem() {
@@ -943,6 +985,7 @@ export struct NativeContentDocument {
             this.refreshContentHeightEstimate();
           }
           this.schedulePositionRestore();
+          this.reportViewportPrepared();
         })
         .onScrollIndex((start: number, end: number): void => {
           this.positionFirstIndex = start;
@@ -1060,11 +1103,13 @@ export struct NativeContentDocument {
         this.refreshContentHeightEstimate();
       }
       this.schedulePositionRestore();
+      this.reportViewportPrepared();
     })
-    .focusable(this.volumeKeyPageTurn)
-    .defaultFocus(this.volumeKeyPageTurn)
+    .focusable(this.volumeKeyPageTurn && (this.answerDocumentKey.length === 0 || this.positionIsActive()))
+    .defaultFocus(this.volumeKeyPageTurn && (this.answerDocumentKey.length === 0 || this.positionIsActive()))
     .onKeyPreIme((event: KeyEvent): boolean => {
-      if (!this.volumeKeyPageTurn || (event.keyCode !== 16 && event.keyCode !== 17)) {
+      if (!this.volumeKeyPageTurn || (this.answerDocumentKey.length > 0 && !this.positionIsActive()) ||
+        (event.keyCode !== 16 && event.keyCode !== 17)) {
         return false;
       }
       if (event.type === KeyType.Down) {

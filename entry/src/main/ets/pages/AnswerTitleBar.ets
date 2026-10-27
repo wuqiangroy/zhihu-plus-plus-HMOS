@@ -45,7 +45,6 @@ export struct AnswerTitleBar {
   /** 回答页过滑切换进行中：整栏淡出让位给整页级预览卡（上游中顶栏随 MainContent 平移滑走）。 */
   @StorageProp('answerOverscrollActive') private overscrollActive: boolean = false;
   /** 横向切换时与正文使用同一 X 轴偏移，保持当前回答的问题栏随整页一起移动。 */
-  @StorageProp('answerOverscrollOffset') private overscrollOffset: number = 0;
   @StorageProp('answerSwitchMode') private answerSwitchMode: string = 'vertical';
 
   private state(): AnswerTitleState | undefined {
@@ -61,6 +60,9 @@ export struct AnswerTitleBar {
   }
 
   private scrolled(): boolean {
+    // 折叠只看正文信息头是否真的滚出视口：横向模式曾被强制折叠成问题标题，
+    // 导致未下滑时正文与顶栏同时出现问题标题/答主，形成信息冗余。
+    // 横向切换期间不再每次重置折叠态（提交时按新正文实际位置继承），标题同样稳定。
     return this.state()?.scrolled ?? false;
   }
 
@@ -188,11 +190,8 @@ export struct AnswerTitleBar {
     // 预览模式恒显示未折叠态且不随过滑平移（位移由预览容器承担）。
     .opacity(this.previewMode ? 1
       : (this.overscrollActive && this.answerSwitchMode !== 'horizontal' ? 0 : 1))
-    .translate({
-      x: this.previewMode || this.answerSwitchMode !== 'horizontal' ? 0 : this.overscrollOffset
-    })
     // 过滑时关闭命中，避免移动中的返回键仍可点。
-    .hitTestBehavior(this.previewMode || this.overscrollActive
+    .hitTestBehavior(this.previewMode || (this.overscrollActive && this.answerSwitchMode !== 'horizontal')
       ? HitTestMode.None : HitTestMode.Transparent)
   }
 }
