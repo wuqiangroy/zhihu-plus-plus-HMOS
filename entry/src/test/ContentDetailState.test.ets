@@ -87,6 +87,17 @@ class ControlledContentRepository implements ContentRepository {
   }
 }
 
+class DeferredAnswerRepository extends ControlledContentRepository {
+  resolveAnswer?: (answer: Answer) => void;
+  getAnswer(id: string): Promise<Answer> {
+    if (id !== '3') { return super.getAnswer(id); }
+    return new Promise<Answer>((resolve: (answer: Answer) => void): void => { this.resolveAnswer = resolve; });
+  }
+  async finishAnswer(): Promise<void> {
+    this.resolveAnswer?.(await super.getAnswer('3'));
+  }
+}
+
 class HttpFailingContentRepository implements ContentRepository {
   private readonly failure: HttpFailure;
   cancelCount: number = 0;
@@ -197,6 +208,36 @@ export default function contentDetailStateTest(): void {
       expect(controller.commitPreparedAnswer(candidate)).assertFalse();
       expect(controller.snapshot().content?.value.id).assertEqual('2');
       expect(controller.snapshot().content?.loadGeneration).assertEqual(original?.loadGeneration);
+      controller.deactivate();
+    });
+
+    it('cancelledCachedCandidateDoesNotCancelAnotherPageRequest', 0, async () => {
+      const repository = new DeferredAnswerRepository();
+      const previous = new ContentDetailController(repository);
+      const next = new ContentDetailController(repository);
+      previous.activate(); next.activate();
+      await previous.load(ContentDetailKind.ANSWER, '1');
+      const opening = next.load(ContentDetailKind.ANSWER, '3');
+      const cached = answerFixture(); cached.id = '2';
+      previous.admitAnswer(cached);
+      previous.cancelPreparedAnswer(); previous.deactivate();
+      expect(repository.cancelCount).assertEqual(0);
+      await repository.finishAnswer(); await opening;
+      expect(next.snapshot().content?.value.id).assertEqual('3');
+      expect(next.snapshot().phase).assertEqual(ContentDetailPhase.READY);
+      next.deactivate();
+    });
+
+    it('cancelsOwnPreparationRequestAndRejectsItsLateResult', 0, async () => {
+      const repository = new DeferredAnswerRepository();
+      const controller = new ContentDetailController(repository);
+      controller.activate(); await controller.load(ContentDetailKind.ANSWER, '1');
+      const preparing = controller.prepareAnswer('3');
+      controller.cancelPreparedAnswer();
+      expect(repository.cancelCount).assertEqual(1);
+      await repository.finishAnswer();
+      expect(await preparing === undefined).assertTrue();
+      expect(controller.snapshot().content?.value.id).assertEqual('1');
       controller.deactivate();
     });
 

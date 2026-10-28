@@ -386,6 +386,9 @@ export struct ContentImagePreview {
   }
 }
 
+let mountedNativeDocuments: number = 0;
+let nativeDocumentSequence: number = 0;
+
 @Component
 export struct NativeContentDocument {
   private readonly bodyTapDetector: DoubleTapDetector = new DoubleTapDetector();
@@ -394,6 +397,16 @@ export struct NativeContentDocument {
   positionKey: string = '';
   /** 导航目的地身份保持不变；在同一路由内切换回答时，保存键仍使用实际回答 ID。 */
   positionOwnerKey: string = '';
+  /** 单篇回答双实例共存时，只有已提交实例可写进度和响应翻页。 */
+  answerDocumentKey: string = '';
+  /** 候选正文（已预挂载、尚未提交）：按自己保存的位置预排版，但不写进度、不响应翻页、不广播折叠标题。 */
+  candidatePane: boolean = false;
+  @StorageProp('readerActiveAnswerDocument') @Watch('onPositionActiveChanged') private activeAnswerDocument: string = '';
+  onDocumentPrepared?: () => void;
+  onViewportPrepared?: (ready: boolean) => void;
+  private viewportPreparedReported: boolean = false;
+  private headerHasLayout: boolean = false;
+  private registeredDocument: boolean = false;
   @StorageProp('readerActiveRouteKey') @Watch('onPositionActiveChanged') private positionVisibleOwner: string = '';
   @StorageProp('readerPositionFlushTick') @Watch('onPositionBackground') private positionFlushTick: number = 0;
   emptyMessage: string = '正文为空';
@@ -438,9 +451,6 @@ export struct NativeContentDocument {
   /**
    * 滚动内容起始内缩（vp）：让视口延伸到悬浮标题栏之下、由内容自身让位，
    * 滚动时正文才会从玻璃顶栏下穿过（顶栏占位式布局下内容到不了顶栏后面，无透光）。
-   * 实现为首个列表项的上内边距（随内容一起滚走），不能用 List.contentStartOffset：
-   * HDS 会把 contentStartOffset 这段内缩排除在滚动距离之外，顶栏渐变模糊要等
-   * 正文滚过约 94vp（内容抵达屏幕顶端）才开始出现。
    * 0 表示不额外让位（沉浸阅读隐藏顶栏 / 非详情页场景）。
    */
   @Prop topInsetVp: number = 0;
@@ -477,6 +487,12 @@ export struct NativeContentDocument {
   private positionSnapshot?: ReaderPosition = undefined;
   private positionMounted: boolean = false;
   private positionWasActive: boolean = false;
+  private positionEverActive: boolean = false;
+  private positionPreparationFailed: boolean = false;
+  private focusRequested: boolean = false;
+  private focusRequestTimer: number = -1;
+  private focusRequestAttempts: number = 0;
+  private readonly documentFocusId: string = `reader_document_${++nativeDocumentSequence}`;
   private positionWritable: boolean = false;
   private positionFirstIndex: number = 0;
   private positionLastIndex: number = 0;
@@ -496,7 +512,7 @@ export struct NativeContentDocument {
   @StorageProp('contentTypographyPreset') @Watch('onTypographyChanged') private typographyPreset: string = 'comfortable';
   @StorageProp('systemFontSizeScale') @Watch('onTypographyChanged') private systemFontSizeScale: number = 1;
   @StorageProp('showPageTurnFab') private showPageTurnFab: boolean = false;
-  @StorageProp('volumeKeyPageTurn') private volumeKeyPageTurn: boolean = false;
+  @StorageProp('volumeKeyPageTurn') @Watch('onVolumeKeyPageTurnChanged') private volumeKeyPageTurn: boolean = false;
   @StorageProp('pageTurnPercent') private pageTurnPercent: number = 90;
   @StorageProp('showPageTurnGuide') private showPageTurnGuide: boolean = false;
   @StorageProp('showContentEndMarker') private showContentEndMarker: boolean = false;
@@ -626,6 +642,10 @@ export struct NativeContentDocument {
   }
 
   aboutToAppear(): void {
+    if (!this.registeredDocument) {
+      this.registeredDocument = true;
+      mountedNativeDocuments += 1;
+    }
     const blocks = parseZhihuHtml(this.html);
     this.empty = blocks.length === 0;
     this.blocks = blocks;
@@ -634,15 +654,20 @@ export struct NativeContentDocument {
       this.previousBlocks.set(blocks[index].id, blocks[index - 1]);
     }
     this.dataSource.replace(blocks);
-    this.loadLinkCardMetas(blocks);
+    if (this.answerDocumentKey.length === 0 || this.positionIsActive()) {
+      this.loadLinkCardMetas(blocks);
+    }
     const plainLength = this.html.replace(/<[^>]*>/g, '').trim().length;
     this.collapsibleActive = this.collapsible && (plainLength >= 100 || this.html.includes('<img'));
     this.prepareReaderPosition();
+    this.onDocumentPrepared?.();
   }
 
   private prepareReaderPosition(): void {
     this.positionMounted = true;
     this.positionWasActive = this.positionIsActive();
+    this.positionEverActive = this.positionWasActive;
+    this.positionPreparationFailed = false;
     this.positionRestoreStarted = 0;
     this.pendingPosition = undefined;
     this.positionWritable = false;
@@ -650,17 +675,11 @@ export struct NativeContentDocument {
     if (!this.readingLayout || this.positionKey.length === 0 || context === undefined || this.empty) { return; }
     try {
       this.positionStore = createReaderPositionStore(context);
-      // 同页切换到的相邻回答（非路由入口内容）不恢复进度：左滑/上下滑进来一律从顶部开始，
-      // 否则会停在上一篇离开时的位置，上一篇读了半截或贴底时就会"一进来跑到最下面"。
-      // 进度仍继续记录，以便以后从外部直接打开这篇时续读。
-      if (this.positionOwnerKey.length > 0 && this.positionKey !== this.positionOwnerKey) {
-        this.positionWritable = true;
-        return;
-      }
       const saved = this.positionStore.load(this.positionKey);
       const index = saved === undefined ? -1 : readerPositionBlockIndex(saved, this.blocks);
       if (saved !== undefined && (saved.blockIndex === -1 || index >= 0)) {
         this.pendingPosition = saved;
+        this.positionSnapshot = saved;
         this.positionTargetIndex = index + 1;
         this.positionNeedsJump = true;
         this.positionLayoutChanged = Date.now();
@@ -673,12 +692,54 @@ export struct NativeContentDocument {
   }
 
   private positionIsActive(): boolean {
-    return this.positionOwnerKey.length > 0 && this.positionVisibleOwner === this.positionOwnerKey;
+    return this.positionOwnerKey.length > 0 && this.positionVisibleOwner === this.positionOwnerKey &&
+      (this.answerDocumentKey.length === 0 || this.activeAnswerDocument === this.answerDocumentKey);
+  }
+
+  /** 可执行位置恢复的主体：当前正文，或尚未提交但已预挂载的候选正文（不写回进度）。 */
+  private positionRestorable(): boolean {
+    return this.positionIsActive() || (this.candidatePane && this.positionOwnerKey.length > 0 &&
+      this.positionVisibleOwner === this.positionOwnerKey);
+  }
+
+  private reportViewportPrepared(): void {
+    const ready = this.positionMounted && this.headerHasLayout && this.viewportWidthVp > 0 &&
+      this.viewportHeightVp > 0 && this.pendingPosition === undefined && !this.positionPreparationFailed;
+    if (ready !== this.viewportPreparedReported) {
+      this.viewportPreparedReported = ready;
+      this.onViewportPrepared?.(ready);
+    }
+    if (ready) { this.requestDocumentFocus(); }
+  }
+
+  private onVolumeKeyPageTurnChanged(): void {
+    this.focusRequested = false;
+    this.focusRequestAttempts = 0;
+    this.requestDocumentFocus();
+  }
+
+  private requestDocumentFocus(): void {
+    if (!this.positionMounted || !this.positionIsActive() || !this.volumeKeyPageTurn || this.focusRequested ||
+      this.focusRequestTimer >= 0 || this.focusRequestAttempts >= 4 ||
+      !this.viewportPreparedReported || this.answerDocumentKey.length === 0) { return; }
+    // 提交后的启用状态需先进入渲染树；焦点成功以 onFocus 为准，API 返回 void。
+    this.focusRequestTimer = setTimeout((): void => {
+      this.focusRequestTimer = -1;
+      if (!this.positionMounted || !this.positionIsActive() || !this.volumeKeyPageTurn ||
+        !this.viewportPreparedReported || this.focusRequested) { return; }
+      this.focusRequestAttempts += 1;
+      try {
+        this.getUIContext().getFocusController().requestFocus(this.documentFocusId);
+      } catch (_error) {
+      }
+      if (!this.focusRequested) { this.requestDocumentFocus(); }
+    }, 50);
   }
 
   private schedulePositionRestore(layoutChanged: boolean = false): void {
     if (layoutChanged) { this.positionLayoutChanged = Date.now(); }
-    if (!this.positionMounted || !this.positionIsActive() || this.pendingPosition === undefined || this.viewportHeightVp <= 0 ||
+    if (!this.positionMounted || !this.positionRestorable() || this.pendingPosition === undefined ||
+      this.viewportHeightVp <= 0 ||
       this.viewportWidthVp <= 0 || this.positionRestoreTimer >= 0) { return; }
     this.positionRestoreTimer = setTimeout((): void => {
       this.positionRestoreTimer = -1;
@@ -688,7 +749,7 @@ export struct NativeContentDocument {
 
   private adjustReaderPosition(): void {
     const saved = this.pendingPosition;
-    if (!this.positionMounted || !this.positionIsActive() || saved === undefined) { return; }
+    if (!this.positionMounted || !this.positionRestorable() || saved === undefined) { return; }
     const now = Date.now();
     if (this.positionRestoreStarted === 0) { this.positionRestoreStarted = now; }
     const expired = now - this.positionRestoreStarted >= 8000;
@@ -733,6 +794,8 @@ export struct NativeContentDocument {
   private finishPositionRestore(success: boolean): void {
     this.pendingPosition = undefined;
     this.positionWritable = success;
+    this.positionPreparationFailed = !success;
+    this.reportViewportPrepared();
     if (success) { this.persistReaderPosition(); }
   }
 
@@ -743,21 +806,37 @@ export struct NativeContentDocument {
     this.positionRestoreTimer = -1;
     this.pendingPosition = undefined;
     this.positionWritable = true;
+    this.reportViewportPrepared();
   }
 
   private onPositionActiveChanged(): void {
     const active = this.positionIsActive();
     const wasActive = this.positionWasActive;
     this.positionWasActive = active;
+    if (active) { this.positionEverActive = true; }
+    if (active && !wasActive && this.positionMounted && this.answerDocumentKey.length > 0 &&
+      this.linkCardMetaLoader === undefined) {
+      this.loadLinkCardMetas(this.blocks);
+    }
     if (!active && wasActive) {
+      this.focusRequested = false;
+      this.focusRequestAttempts = 0;
+      if (this.focusRequestTimer >= 0) { clearTimeout(this.focusRequestTimer); }
+      this.focusRequestTimer = -1;
+      this.linkCardMetaLoader?.dispose();
+      this.linkCardMetaLoader = undefined;
       this.persistReaderPosition(true);
       if (this.positionSaveTimer >= 0) { clearTimeout(this.positionSaveTimer); }
       if (this.positionRestoreTimer >= 0) { clearTimeout(this.positionRestoreTimer); }
       this.positionSaveTimer = -1;
       this.positionRestoreTimer = -1;
     } else if (active && !wasActive) {
-      this.positionRestoreStarted = 0;
-      this.schedulePositionRestore(true);
+      // 候选已按自己的锚点完成恢复；提交只接管输入和写入，不再重新跳转。
+      this.schedulePositionRestore();
+      this.onScrollOffset?.(this.scrollYVp);
+      this.onTopEdgeChange?.(this.atTopEdge);
+      this.onBottomEdgeChange?.(this.atBottomEdge);
+      this.requestDocumentFocus();
     }
   }
 
@@ -803,7 +882,7 @@ export struct NativeContentDocument {
   }
 
   private persistReaderPosition(synchronous: boolean = false): void {
-    if (!this.positionMounted || (!this.positionIsActive() && !synchronous) ||
+    if (!this.positionMounted || (!this.positionIsActive() && (!synchronous || !this.positionEverActive)) ||
       !this.positionWritable || this.positionStore === undefined) { return; }
     if (this.positionSaveTimer >= 0) { clearTimeout(this.positionSaveTimer); }
     this.positionSaveTimer = -1;
@@ -826,12 +905,12 @@ export struct NativeContentDocument {
    */
   private loadLinkCardMetas(blocks: ReaderBlock[]): void {
     const repository = this.linkCardMetaRepository;
-    if (repository === undefined) {
+    if (repository === undefined || (this.answerDocumentKey.length > 0 && !this.positionIsActive())) {
       return;
     }
     const loader = new LinkCardMetaLoader(repository);
     loader.onUpdate = (url: string, meta: LinkCardMeta): void => {
-      this.applyLinkCardMeta(url, meta);
+      if (this.positionMounted && (this.answerDocumentKey.length === 0 || this.positionIsActive())) { this.applyLinkCardMeta(url, meta); }
     };
     this.linkCardMetaLoader = loader;
     const urls: Array<string> = [];
@@ -866,13 +945,20 @@ export struct NativeContentDocument {
     if (this.positionWasActive) { this.persistReaderPosition(true); }
     this.positionMounted = false;
     this.positionWasActive = false;
+    if (this.focusRequestTimer >= 0) { clearTimeout(this.focusRequestTimer); }
+    this.focusRequestTimer = -1;
+    this.reportViewportPrepared();
     if (this.positionRestoreTimer >= 0) { clearTimeout(this.positionRestoreTimer); }
     if (this.positionSaveTimer >= 0) { clearTimeout(this.positionSaveTimer); }
     this.positionRestoreTimer = -1;
     this.positionSaveTimer = -1;
     this.linkCardMetaLoader?.dispose();
     this.linkCardMetaLoader = undefined;
-    clearFormulaByteCache();
+    if (this.registeredDocument) {
+      this.registeredDocument = false;
+      mountedNativeDocuments = Math.max(0, mountedNativeDocuments - 1);
+      if (mountedNativeDocuments === 0) { clearFormulaByteCache(); }
+    }
   }
 
   build() {
@@ -880,15 +966,12 @@ export struct NativeContentDocument {
     Stack({ alignContent: Alignment.TopEnd }) {
       List({ space: this.blockSpacing(), scroller: this.scroller }) {
           ListItem() { this.documentHeader() }
-            // 悬浮顶栏让位放在首个列表项的上内边距里（随内容滚走）：未滚动时信息头
-            // 仍从顶栏下方开始，滚动后正文立刻从玻璃顶栏背后穿过，HDS 渐变模糊随起手出。
             // List.space 已含段间距，仅补足信息头与正文之间的留白；大段间距偏好不被压缩。
-            .padding({
-              top: this.topInsetVp,
-              bottom: this.readingLayout ? Math.max(0, 24 - this.blockSpacing()) : 0
-            })
+            .padding({ top: this.topInsetVp, bottom: this.readingLayout ? Math.max(0, 24 - this.blockSpacing()) : 0 })
             .onAreaChange((_oldArea: Area, newArea: Area): void => {
               this.reportChromeHeight('header', newArea);
+              this.headerHasLayout = Number(newArea.width) > 0 && Number(newArea.height) > 0;
+              this.reportViewportPrepared();
             })
           if (this.empty) {
             ListItem() {
@@ -946,15 +1029,18 @@ export struct NativeContentDocument {
         })
         // 末尾避让随正文滚动，避免底部 padding 压缩视口、在悬浮操作栏下方形成固定留白。
         .contentEndOffset(this.bottomInsetVp)
+        // 起始内缩随正文滚动（同 contentEndOffset 思路）：视口可延伸到悬浮顶栏之下，
+        // 未滚动时正文仍从顶栏下方开始，滚动后正文从玻璃顶栏背后穿过。
         .cachedCount(6)
         .edgeEffect(this.disableEdgeSpring ? EdgeEffect.None : EdgeEffect.Spring)
         .onAreaChange((_oldArea: Area, newArea: Area): void => {
           const height = Number(newArea.height);
-          if (height > 0 && Math.abs(height - this.viewportHeightVp) > 0.5) {
+          if (height >= 0 && Math.abs(height - this.viewportHeightVp) > 0.5) {
             this.viewportHeightVp = height;
             this.refreshContentHeightEstimate();
           }
           this.schedulePositionRestore();
+          this.reportViewportPrepared();
         })
         .onScrollIndex((start: number, end: number): void => {
           this.positionFirstIndex = start;
@@ -1066,24 +1152,22 @@ export struct NativeContentDocument {
     })
     .onAreaChange((_oldArea: Area, area: Area): void => {
       const width = Number(area.width);
-      if (width > 0 && Math.abs(width - this.viewportWidthVp) > 0.5) {
+      if (width >= 0 && Math.abs(width - this.viewportWidthVp) > 0.5) {
         this.viewportWidthVp = width;
         this.exactContentHeightVp = 0;
         this.refreshContentHeightEstimate();
       }
       this.schedulePositionRestore();
+      this.reportViewportPrepared();
     })
-    .focusable(this.volumeKeyPageTurn)
-    .defaultFocus(this.volumeKeyPageTurn)
-    .onKeyPreIme((event: KeyEvent): boolean => {
-      if (!this.volumeKeyPageTurn || (event.keyCode !== 16 && event.keyCode !== 17)) {
-        return false;
-      }
-      if (event.type === KeyType.Down) {
-        this.turnPage(event.keyCode === 16 ? -1 : 1);
-      }
-      return true;
+    .id(this.documentFocusId)
+    .onFocus((): void => {
+      this.focusRequested = true;
+      this.focusRequestAttempts = 0;
     })
+    .focusable(this.volumeKeyPageTurn && (this.answerDocumentKey.length === 0 || this.positionIsActive()))
+    .defaultFocus(this.volumeKeyPageTurn && (this.answerDocumentKey.length === 0 || this.positionIsActive()))
+    .onKeyPreIme((event: KeyEvent): boolean => this.handleReaderKey(event))
   }
 
   /** 段间距/块间距（vp，`List({ space })` 传 number 即 vp）：12 × 段间距%，默认 12 == 改造前。 */
@@ -1099,7 +1183,16 @@ export struct NativeContentDocument {
     return `${item.id}:${this.renderRevision}:${this.linkCardMetaVersions.get(item.sourceUrl) ?? 0}`;
   }
 
+  private handleReaderKey(event: KeyEvent): boolean {
+    if (!this.volumeKeyPageTurn || (this.answerDocumentKey.length > 0 && !this.positionIsActive()) ||
+      (event.keyCode !== 16 && event.keyCode !== 17)) { return false; }
+    // 一次释放只翻一页，兼容系统保留音量键按下事件的设备，也避免按住期间重复切答。
+    if (event.type === KeyType.Up) { this.turnPage(event.keyCode === 16 ? -1 : 1); }
+    return true;
+  }
+
   private turnPage(direction: number): void {
+    if (this.answerDocumentKey.length > 0 && !this.positionIsActive()) { return; }
     this.cancelPositionRestore();
     const maxOffset = Math.max(0, this.contentHeightVp - this.viewportHeightVp);
     if (direction < 0 && this.scrollYVp <= 2) {
@@ -1136,6 +1229,8 @@ export struct NativeContentDocument {
   }
 
   private rebuildRenderedBlocks(): void {
+    this.viewportPreparedReported = false;
+    this.onViewportPrepared?.(false);
     // 设置页覆盖着详情时，字号仍会广播到缓存的正文；保留隐藏前的锚点，禁止布局变化覆盖进度。
     if (this.positionMounted && this.positionStore !== undefined && this.pendingPosition === undefined &&
       this.positionWritable) {
@@ -1182,6 +1277,7 @@ export struct NativeContentDocument {
     }
     this.refreshContentHeightEstimate();
     this.schedulePositionRestore(true);
+    this.reportViewportPrepared();
   }
 
   /** 正文块之外的固定槽位（页头/正文页脚/页脚）实测高度（vp）。 */
@@ -1197,6 +1293,7 @@ export struct NativeContentDocument {
     this.chromeHeights.set(key, height);
     this.refreshContentHeightEstimate();
     this.schedulePositionRestore(true);
+    this.reportViewportPrepared();
   }
 
   private chromeHeightVp(): number {

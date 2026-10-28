@@ -1,3 +1,4 @@
+import answerPanePreparationTest from './AnswerPanePreparation.test';
 import answerSwitchPrefetchTest from './AnswerSwitchPrefetch.test';
 import feedWaterfallLayoutTest from './FeedWaterfallLayout.test';
 import feedFlowDataSourceTest from './FeedFlowDataSource.test';
@@ -143,6 +144,7 @@ export default function testsuite(): void {
   questionAnswerFeedTest();
   contentDetailStateTest();
   answerSwitchPrefetchTest();
+  answerPanePreparationTest();
   loginControllerTest();
   channelFeedRepositoryTest();
   channelFeedStateTest();

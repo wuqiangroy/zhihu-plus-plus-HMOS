@@ -44,15 +44,16 @@ function load(file) {
   return mod.exports;
 }
 function methodHarness(file, name, globals = {}) {
-  const source = read(file);
-  const begin = source.search(new RegExp('  private (?:async )?' + name + '\\('));
+  let source = read(file);
+  if (file.endsWith('NativeContentDocument.ets')) source = source.slice(source.indexOf('export struct NativeContentDocument'));
+  const begin = source.search(new RegExp('  (?:private )?(?:async )?' + name + '\\('));
   assert(begin >= 0, `method missing: ${name}`);
   const end = source.indexOf('\n  }', begin);
   assert(end > begin, `method end missing: ${name}`);
   return vm.runInNewContext(compile('class Harness {\n' + source.slice(begin, end + 4) + '\n}') + '\nHarness', globals);
 }
 const pages = 'entry/src/main/ets/pages/';
-const { ContentDetailController, ContentDetailPhase } = load(pages + 'ContentDetailState.ets');
+const { ContentDetailController, ContentDetailPhase, acceptsContentDocumentEvent } = load(pages + 'ContentDetailState.ets');
 const { ContentDetailKind } = load('data/src/main/ets/repository/ContentRepository.ets');
 const answer = id => ({id, questionId: '123', contentHtml: '<p>body</p>', excerpt: '', url: '',
   voteupCount: 0, commentCount: 0, createdAt: 1, updatedAt: 1});
@@ -71,34 +72,59 @@ function controllerFixture() {
 function pageFixture(repository = {getAnswer: async id => answer(id), cancel() {}}, prefetchRepository) {
   const {QuestionAnswerNavigator} = load(pages + 'QuestionAnswerNavigator.ets');
   const {AnswerDetailPrefetcher} = load(pages + 'AnswerSwitchPrefetch.ets');
+  const broadcasts = [];
+  const storage = {setOrCreate: (key, value) => broadcasts.push({key, value})};
   const names = ['applyAnswerMove', 'moveAnswer', 'commitAnswerSwitch', 'invalidateAnswerSwitch',
-    'waitForAnswerViewport', 'finishAnswerViewportWait', 'showAnswerSwitchFailure', 'applyVoteState', 'onLoginChanged'];
+    'waitForAnswerViewport', 'finishAnswerViewportWait', 'showAnswerSwitchFailure', 'applyVoteState', 'onLoginChanged', 'isDisplayedContent',
+    'answerDocumentKey', 'setAnswerPanes', 'candidatePane', 'mountAnswerCandidate', 'unmountAnswerCandidate',
+    'onAnswerDocumentPrepared', 'onAnswerViewportPrepared', 'trackAnswerPaneViewport', 'trackAnswerPaneEdges',
+    'beginAnswerSwitchWait', 'dismissAnswerSwitchWait', 'prepareSwitchAnswer', 'cancelAnswerDrag',
+    'answerPageVisible', 'publishActiveAnswerDocument', 'onReaderOwnerChanged', 'answerPaneTranslate', 'answerPaneVisible', 'answerSwitchPageTranslate', 'answerSwitchExtentVp', 'applyOverscrollOffset'];
   const Harness = methodHarness(pages + 'ContentDetailPages.ets', names[0],
-    {AppStorage: {setOrCreate() {}}, ContentDetailKind, ContentDetailPhase});
+    {AppStorage: storage, ContentDetailKind, ContentDetailPhase, acceptsContentDocumentEvent, readerPositionKey: (kind, id) => kind + ':' + id});
   for (const name of names.slice(1)) {
     Harness.prototype[name] = methodHarness(pages + 'ContentDetailPages.ets', name,
-      {AppStorage: {setOrCreate() {}}, ContentDetailKind, ContentDetailPhase, SessionStatus: {AUTHENTICATED: 'authenticated'}, setTimeout, clearTimeout}).prototype[name];
+      {AppStorage: storage, ContentDetailKind, ContentDetailPhase, acceptsContentDocumentEvent, readerPositionKey: (kind, id) => kind + ':' + id, SessionStatus: {AUTHENTICATED: 'authenticated'}, setTimeout, clearTimeout}).prototype[name];
   }
   const page = new Harness();
   const opened = [];
-  const controller = new ContentDetailController(repository, {upsert: async record => {opened.push(record.contentKey);}});
+  const controller = new ContentDetailController(repository, {upsert: async record => {opened.push(record.contentKey);}}, state => {
+    page.phase = state.phase;
+    page.content = state.content;
+    if (state.content?.kind === ContentDetailKind.ANSWER &&
+      !page.answerPanes.some(pane => page.answerDocumentKey(pane) === page.answerDocumentKey(state.content))) {
+      page.setAnswerPanes([state.content]);
+    }
+  });
   const seed = {phase: 'ready', items: ['1', '2', '3'].map(id => ({feedItem: {target: answer(id)}})),
     loadingMore: false, canLoadMore: false, sortOrder: 'default', errorMessage: '', requiresLogin: false};
   const navigator = new QuestionAnswerNavigator('123', '1', seed, {cancel() {}, loadPage() {throw Error('unexpected paging');}});
   let voteDeactivated = false;
   const messages = [];
   Object.assign(page, {kind: ContentDetailKind.ANSWER, answerNavigator: navigator, navigatorRevision: 0,
-    pageActive: true, activeContentId: '1', phase: 'ready', controller, answerQuestionId: '123',
+    pageActive: true, contentId: '1', readerVisibleOwner: 'answer:1', activeContentId: '1', phase: 'ready', controller, answerQuestionId: '123',
     navigatorBusy: false, interactionPending: false, answerSwitchEpoch: 0, favoriteStateEpoch: 0,
+    answerPanes: [], answerPaneScope: 1, candidateDirection: 0, answerPaneRevision: 0,
+    answerSwitchWaitTimer: -1, answerPaneViewports: new Map(), answerPaneTitleHeights: new Map(),
+    answerPanePreparation: new (load(pages + 'AnswerPanePreparation.ets').AnswerPanePreparation)(),
     session: {getState: () => ({status: 'authenticated'})}, answerDataSource: {replace() {}}, ensureAnswers() {}, answerViewportWidthVp: 360,
     answerViewportHeightVp: 800, answerViewportTimer: -1, ensureAnswerPrefetcher() {},
     answerPrefetcher: prefetchRepository ? new AnswerDetailPrefetcher(prefetchRepository) : undefined,
     voteController: {deactivate() {voteDeactivated = true;}},
-    animateOverscrollTo: async () => {}, answerSwitchExtentVp: () => 360, answerPreviewData() {},
-    applyOverscrollOffset() {}, resetAnswerOverscroll() {}, prefetchNeighborAnswer() {},
+    animateOverscrollTo: async () => {}, answerCollapseThresholdVp: () => 64,
+    answerSwitchMode: 'horizontal', answerOverscrollOffset: 0, resetAnswerOverscroll() {}, prefetchNeighborAnswer() {},
     getUIContext: () => ({getPromptAction: () => ({showToast(item) {messages.push(item.message);}})})});
+  page.automaticallyPrepareCandidate = true;
+  const mount = page.mountAnswerCandidate.bind(page);
+  page.mountAnswerCandidate = (content, direction) => {
+    mount(content, direction);
+    if (page.automaticallyPrepareCandidate) queueMicrotask(() => {
+      page.onAnswerDocumentPrepared(content);
+      page.onAnswerViewportPrepared(content, true);
+    });
+  };
   controller.activate();
-  return {page, controller, navigator, opened, messages, voteDeactivated: () => voteDeactivated,
+  return {page, controller, navigator, opened, messages, broadcasts, voteDeactivated: () => voteDeactivated,
     dispose() {page.invalidateAnswerSwitch(); page.answerPrefetcher?.dispose(); navigator.dispose(); controller.deactivate();}};
 }
 contract('target-failure-keeps-current-body-and-identity', false, async () => {
@@ -148,7 +174,7 @@ contract('candidate-commits-once-and-rejects-stale-candidate', false, async () =
     assert.equal(controller.commitPreparedAnswer(departed), false);
   } finally { controller.deactivate(); }
 });
-contract('non-entry-answer-restores-its-own-position', true, () => {
+contract('non-entry-answer-restores-its-own-position', false, () => {
   const saved = {blockIndex: 4, fraction: 0.5};
   const keys = [];
   const Harness = methodHarness(pages + 'NativeContentDocument.ets', 'prepareReaderPosition', {
@@ -251,7 +277,7 @@ contract('prefetch-queue-deduplicates-prioritizes-and-drops-late-results', false
     assert.equal(await prefetcher.request('101', true), undefined);
   } finally { prefetcher.dispose(); }
 });
-contract('cancelled-candidate-does-not-write-progress', true, () => {
+contract('cancelled-candidate-does-not-write-progress', false, () => {
   let writes = 0;
   const saved = {blockIndex: 4, fraction: 0.5};
   const store = {load: () => saved, save: () => {writes++;}};
@@ -427,8 +453,182 @@ contract('unavailable-viewport-and-cancellation-do-not-commit', false, async () 
     assert.equal(fixture.navigator.currentId(), '1');
     fixture.page.finishAnswerViewportWait(false);
     assert.equal(await moving, false);
-    assert.equal(fixture.messages[0], '回答视口准备超时，请重试');
+    assert.equal(fixture.messages[0], '回答正文准备超时，请重试');
     assert.deepEqual(fixture.opened, ['answer:1']);
+  } finally {fixture.dispose();}
+});
+for (const mode of ['horizontal', 'vertical']) {
+  contract('real-candidate-' + mode + '-waits-for-both-signals-and-retains-key', false, async () => {
+    const fixture = pageFixture();
+    try {
+      await fixture.controller.load(ContentDetailKind.ANSWER, '1');
+      fixture.page.automaticallyPrepareCandidate = false;
+      fixture.page.answerSwitchMode = mode;
+      let animations = 0;
+      fixture.page.animateOverscrollTo = async target => {if (target !== 0) animations++;};
+      const moving = fixture.page.applyAnswerMove(1); await tick();
+      const candidate = fixture.page.candidatePane();
+      const key = fixture.page.answerDocumentKey(candidate);
+      fixture.page.answerOverscrollOffset = -100;
+      const position = fixture.page.answerPaneTranslate(candidate);
+      assert.equal(mode === 'horizontal' ? position.x : position.y, (mode === 'horizontal' ? 360 : 800) - 100);
+      fixture.page.onAnswerViewportPrepared(candidate, true); await tick();
+      assert.equal(animations, 0, 'viewport alone cannot start landing');
+      assert.equal(fixture.page.activeContentId, '1');
+      fixture.page.onAnswerDocumentPrepared(candidate); await moving;
+      assert.equal(animations, 1);
+      assert.equal(fixture.page.answerPanes.length, 1);
+      assert.equal(fixture.page.answerPanes[0], candidate, 'commit must retain admitted candidate object');
+      assert.equal(fixture.page.answerDocumentKey(fixture.page.answerPanes[0]), key);
+      assert.equal(fixture.controller.snapshot().content.loadGeneration, candidate.loadGeneration);
+    } finally {fixture.dispose();}
+  });
+}
+contract('candidate-ready-callback-after-cancellation-cannot-unblock-another-instance', false, async () => {
+  const fixture = pageFixture();
+  try {
+    await fixture.controller.load(ContentDetailKind.ANSWER, '1');
+    fixture.page.automaticallyPrepareCandidate = false;
+    const cancelled = fixture.page.applyAnswerMove(1); await tick();
+    const old = fixture.page.candidatePane();
+    fixture.page.invalidateAnswerSwitch(); assert.equal(await cancelled, false);
+    const retry = fixture.page.applyAnswerMove(1); await tick();
+    const fresh = fixture.page.candidatePane();
+    fixture.page.onAnswerDocumentPrepared(old); fixture.page.onAnswerViewportPrepared(old, true);
+    await tick();
+    assert.equal(fixture.page.activeContentId, '1');
+    assert.notEqual(fixture.page.answerDocumentKey(old), fixture.page.answerDocumentKey(fresh));
+    fixture.page.onAnswerDocumentPrepared(fresh); fixture.page.onAnswerViewportPrepared(fresh, true);
+    assert.equal(await retry, true);
+    assert.equal(fixture.page.activeContentId, '2');
+  } finally {fixture.dispose();}
+});
+contract('native-viewport-ready-waits-for-position-restoration-and-invalidates-on-zero-area', false, () => {
+  const events = [];
+  const Harness = methodHarness(pages + 'NativeContentDocument.ets', 'reportViewportPrepared');
+  const document = new Harness();
+  Object.assign(document, {positionMounted: true, headerHasLayout: true, viewportWidthVp: 360,
+    viewportHeightVp: 800, viewportPreparedReported: false, pendingPosition: {blockIndex: 4},
+    positionPreparationFailed: false, onViewportPrepared: ready => events.push(ready), requestDocumentFocus() {}});
+  document.reportViewportPrepared(); assert.deepEqual(events, []);
+  document.pendingPosition = undefined; document.reportViewportPrepared(); assert.deepEqual(events, [true]);
+  document.viewportWidthVp = 0; document.reportViewportPrepared(); assert.deepEqual(events, [true, false]);
+});
+contract('candidate-page-turn-never-consumes-input-or-writes-progress', false, () => {
+  let turns = 0;
+  const Harness = methodHarness(pages + 'NativeContentDocument.ets', 'turnPage');
+  const document = new Harness();
+  Object.assign(document, {answerDocumentKey: 'candidate:2', positionIsActive: () => false,
+    cancelPositionRestore() {throw Error('candidate must not cancel restoration');},
+    onPageTurnPastStart() {turns++;}, onPageTurnPastEnd() {turns++;}});
+  document.turnPage(1); document.turnPage(-1); assert.equal(turns, 0);
+});
+contract('native-candidate-activation-keeps-restored-position-and-takes-focus-once', false, async () => {
+  let active = false, focus = 0, metadata = 0, restores = 0;
+  const names = ['onPositionActiveChanged', 'requestDocumentFocus'];
+  const Harness = methodHarness(pages + 'NativeContentDocument.ets', names[0]);
+  Harness.prototype.requestDocumentFocus = methodHarness(pages + 'NativeContentDocument.ets', names[1], {setTimeout, clearTimeout}).prototype.requestDocumentFocus;
+  const document = new Harness();
+  Object.assign(document, {positionMounted: true, positionWasActive: false, positionEverActive: false,
+    answerDocumentKey: 'candidate:2', positionIsActive: () => active, pendingPosition: undefined,
+    viewportPreparedReported: true, volumeKeyPageTurn: true, focusRequested: false, focusRequestTimer: -1, focusRequestAttempts: 0,
+    documentFocusId: 'native:2', scrollYVp: 300, loadLinkCardMetas() {metadata++; this.linkCardMetaLoader = {};},
+    schedulePositionRestore() {if (this.pendingPosition !== undefined) restores++;},
+    getUIContext: () => ({getFocusController: () => ({requestFocus() {focus++; document.focusRequested = true;}})})});
+  document.onPositionActiveChanged(); assert.equal(focus, 0); assert.equal(metadata, 0);
+  active = true; document.onPositionActiveChanged(); document.onPositionActiveChanged();
+  await new Promise(resolve => setTimeout(resolve, 70));
+  assert.equal(focus, 1); assert.equal(metadata, 1); assert.equal(restores, 0);
+  assert.equal(document.scrollYVp, 300); assert.equal(document.positionEverActive, true);
+});
+contract('disposing-one-native-document-keeps-shared-formula-cache-for-survivors', false, () => {
+  let mounted = 0, clears = 0, parses = 0;
+  const globals = () => {
+    const context = {clearTimeout, console: {info() {}}, clearFormulaByteCache: () => {clears++;},
+      parseZhihuHtml: () => {parses++; return [];}};
+    Object.defineProperty(context, 'mountedNativeDocuments', {get: () => mounted, set: value => {mounted = value;}});
+    return context;
+  };
+  const appear = methodHarness(pages + 'NativeContentDocument.ets', 'aboutToAppear', globals());
+  const disappear = methodHarness(pages + 'NativeContentDocument.ets', 'aboutToDisappear', globals());
+  const make = key => {
+    const document = new appear();
+    Object.assign(document, {registeredDocument: false, html: '', answerDocumentKey: key,
+      previousBlocks: new Map(), dataSource: {replace() {}}, positionIsActive: () => false,
+      prepareReaderPosition() {}, positionWasActive: false, reportViewportPrepared() {},
+      positionRestoreTimer: -1, positionSaveTimer: -1});
+    return document;
+  };
+  const current = make('1:1'), candidate = make('2:2');
+  current.aboutToAppear(); candidate.aboutToAppear();
+  assert.equal(mounted, 2); assert.equal(parses, 2);
+  disappear.prototype.aboutToDisappear.call(candidate); assert.equal(mounted, 1); assert.equal(clears, 0);
+  disappear.prototype.aboutToDisappear.call(current); assert.equal(mounted, 0); assert.equal(clears, 1);
+  disappear.prototype.aboutToDisappear.call(current); assert.equal(clears, 1);
+});
+contract('hidden-answer-page-cannot-publish-active-document-or-start-switch', false, async () => {
+  const fixture = pageFixture();
+  try {
+    await fixture.controller.load(ContentDetailKind.ANSWER, '1');
+    fixture.page.publishActiveAnswerDocument();
+    const published = fixture.broadcasts.length;
+    assert(published > 0, 'visible page must publish its document identity');
+    fixture.page.readerVisibleOwner = 'answer:other-page';
+    fixture.page.publishActiveAnswerDocument();
+    assert.equal(fixture.broadcasts.length, published);
+    assert.equal(fixture.page.answerPageVisible(), false);
+    assert.equal(fixture.page.isDisplayedContent(fixture.page.content), false);
+    assert.equal(await fixture.page.applyAnswerMove(1), false);
+    assert.equal(fixture.navigator.currentId(), '1');
+    assert.deepEqual(fixture.opened, ['answer:1']);
+  } finally {fixture.dispose();}
+});
+contract('route-owner-change-cancels-candidate-awaiting-layout', false, async () => {
+  const fixture = pageFixture();
+  try {
+    await fixture.controller.load(ContentDetailKind.ANSWER, '1');
+    fixture.page.automaticallyPrepareCandidate = false;
+    const moving = fixture.page.applyAnswerMove(1); await tick();
+    const candidate = fixture.page.candidatePane();
+    fixture.page.readerVisibleOwner = 'answer:other-page';
+    fixture.page.onReaderOwnerChanged();
+    fixture.page.onAnswerDocumentPrepared(candidate); fixture.page.onAnswerViewportPrepared(candidate, true);
+    assert.equal(await moving, false);
+    assert.equal(fixture.page.navigatorBusy, false);
+    assert.equal(fixture.page.activeContentId, '1');
+    assert.deepEqual(fixture.opened, ['answer:1']);
+  } finally {fixture.dispose();}
+});
+contract('volume-key-release-turns-once-and-candidate-never-consumes-it', false, () => {
+  const Harness = methodHarness(pages + 'NativeContentDocument.ets', 'handleReaderKey', {KeyType: {Down: 0, Up: 1}});
+  const document = new Harness();
+  const turns = [];
+  let active = true;
+  Object.assign(document, {volumeKeyPageTurn: true, answerDocumentKey: 'b:2', positionIsActive: () => active,
+    turnPage: direction => turns.push(direction)});
+  assert.equal(document.handleReaderKey({keyCode: 17, type: 0}), true);
+  assert.deepEqual(turns, []);
+  assert.equal(document.handleReaderKey({keyCode: 17, type: 1}), true);
+  assert.deepEqual(turns, [1]);
+  assert.equal(document.handleReaderKey({keyCode: 16, type: 1}), true); // device sends release only
+  assert.deepEqual(turns, [1, -1]);
+  active = false;
+  assert.equal(document.handleReaderKey({keyCode: 17, type: 0}), false);
+  assert.equal(document.handleReaderKey({keyCode: 17, type: 1}), false);
+  assert.deepEqual(turns, [1, -1]);
+});
+contract('hidden-page-defers-account-refresh-until-its-route-is-visible', false, async () => {
+  const fixture = pageFixture();
+  try {
+    await fixture.controller.load(ContentDetailKind.ANSWER, '1');
+    fixture.page.readerVisibleOwner = 'answer:another-page';
+    fixture.page.onLoginChanged(); await tick();
+    assert.equal(fixture.page.sessionReloadPending, true);
+    assert.deepEqual(fixture.opened, ['answer:1']);
+    fixture.page.readerVisibleOwner = 'answer:1';
+    fixture.page.onReaderOwnerChanged(); await tick();
+    assert.equal(fixture.page.sessionReloadPending, false);
+    assert.deepEqual(fixture.opened, ['answer:1', 'answer:1']);
   } finally {fixture.dispose();}
 });
 (async () => {
