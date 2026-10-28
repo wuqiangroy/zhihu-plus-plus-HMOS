@@ -40,6 +40,16 @@ export enum HotCommentPhase {
   READY = 'ready'
 }
 
+/**
+ * 正文尾部是否渲染热评区块：
+ * 只有拿到可展示的热评时才占位；「没有热评」（含评论都在但都没赞）整块隐藏，
+ * 不再留一张只有「暂无热评」的空卡片。加载中与失败仍保留反馈（在文档末尾，出现/消失不推移上方正文）。
+ */
+export function hotCommentSectionVisible(phase: HotCommentPhase): boolean {
+  return phase === HotCommentPhase.LOADING || phase === HotCommentPhase.ERROR ||
+    phase === HotCommentPhase.READY;
+}
+
 export interface HotCommentViewState {
   answerId: string;
   phase: HotCommentPhase;

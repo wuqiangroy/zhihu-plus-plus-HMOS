@@ -9,7 +9,12 @@ import { AnswerTitleGeometry } from './AnswerTitleGeometry';
 import { publishArticleTitle } from './ArticleTitleBar';
 import { FeedContentSummary } from './components/FeedContentSummary';
 import { HotCommentSection } from './components/HotCommentSection';
-import { HotCommentController, HotCommentPhase, HotCommentViewState } from './HotCommentState';
+import {
+  HotCommentController,
+  HotCommentPhase,
+  hotCommentSectionVisible,
+  HotCommentViewState
+} from './HotCommentState';
 import {
   AppPageStatusKind,
   AppPageStatusPanel,
@@ -1655,12 +1660,14 @@ struct ContentDetailPage {
 
   /**
    * 正文页脚：回答页显示「热门评论」预览（日期已前移到正文页脚，避免与热评同层互相覆盖）。
-   * 热评只对回答生效；无评论时保留卡片显示空态，不再加载完成后整体消失。
+   * 热评只对回答生效；没有可展示热评（无评论/评论都没赞/已折叠）时整块不渲染，
+   * 不在正文末尾留一张只有「暂无热评」的空卡片。区块在文档末尾，隐藏不会推移上方正文。
    */
   @Builder
   private answerFooter(content: LoadedContentDetail) {
     if (content.kind === ContentDetailKind.ANSWER && this.showHotComments &&
-      this.isDisplayedContent(content) && this.hotCommentState.answerId === content.value.id) {
+      this.isDisplayedContent(content) && this.hotCommentState.answerId === content.value.id &&
+      hotCommentSectionVisible(this.hotCommentState.phase)) {
       HotCommentSection({
         comments: this.hotCommentState.comments,
         totalCount: contentCommentCount(content),

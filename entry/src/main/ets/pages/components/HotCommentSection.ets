@@ -10,7 +10,8 @@ const HOT_COMMENT_FLAME_COLOR: string = '#FF5722';
  * 回答尾部的「热门评论」预览：最多几条由页面决定（当前 3 条，按热度排序的根评论），
  * 文字行与图片为互不嵌套的原生点击区域；拖动由点击位移阈值过滤。
  *
- * 数据加载、失败与空态由页面控制。
+ * 数据加载、失败与空态由页面控制：**没有热评时页面根本不渲染本组件**
+ * （见 HotCommentState.hotCommentSectionVisible），组件内只保留一行空态兜底以防误用。
  */
 @Component
 export struct HotCommentSection {
@@ -86,8 +87,8 @@ export struct HotCommentSection {
         .width('100%')
         .justifyContent(FlexAlign.Center)
       } else if (this.comments.length === 0) {
-        // 没有评论、或评论都被过滤（0 赞同不算热评）时统一提示"暂无热评"：
-        // 不能再用 totalCount 推断加载失败——那会把"评论都在但都没赞"误报成接口错误。
+        // 空态不再由本组件承载：页面在 EMPTY 阶段直接不渲染整个区块（见 hotCommentSectionVisible）。
+        // 保留兜底是为了防御误用（例如未来从别处传入空列表），此时只占一行提示，不留空白卡片。
         Text('暂无热评')
           .id('content_detail_hot_comments_empty')
           .fontSize($r('app.float.secondary_font_size'))

@@ -1,6 +1,11 @@
 import { describe, expect, it } from '@ohos/hypium';
 import { CommentItem } from 'data';
-import { HOT_COMMENT_PREVIEW_LIMIT, hotCommentPreview } from '../main/ets/pages/HotCommentState';
+import {
+  HOT_COMMENT_PREVIEW_LIMIT,
+  HotCommentPhase,
+  hotCommentPreview,
+  hotCommentSectionVisible
+} from '../main/ets/pages/HotCommentState';
 
 /** 构造一条评论：默认可见、未折叠、有正文、有赞同。 */
 function comment(id: string, contentHtml: string, isDelete: boolean = false,
@@ -66,6 +71,15 @@ export default function hotCommentStateTest(): void {
       const items: Array<CommentItem> = [comment('1', '<p>甲</p>')];
       expect(hotCommentPreview(items, 0).length).assertEqual(0);
       expect(hotCommentPreview(items, -1).length).assertEqual(0);
+    });
+
+    it('hidesTheSectionOnlyWhenThereIsNothingToShow', 0, () => {
+      // 有可展示热评、加载中、加载失败都占位；空结果（含评论都在但都没赞）整块隐藏。
+      expect(hotCommentSectionVisible(HotCommentPhase.READY)).assertTrue();
+      expect(hotCommentSectionVisible(HotCommentPhase.LOADING)).assertTrue();
+      expect(hotCommentSectionVisible(HotCommentPhase.ERROR)).assertTrue();
+      expect(hotCommentSectionVisible(HotCommentPhase.EMPTY)).assertFalse();
+      expect(hotCommentSectionVisible(HotCommentPhase.IDLE)).assertFalse();
     });
   });
 }
