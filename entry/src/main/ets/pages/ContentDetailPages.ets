@@ -5,6 +5,7 @@ import { QuestionAnswerNavigator, stageQuestionAnswerNavigator, takeQuestionAnsw
 import { ContentImagePreview } from './NativeContentDocument';
 import { publishQuestionTitle } from './QuestionTitleBar';
 import { publishAnswerTitle } from './AnswerTitleBar';
+import { AnswerTitleGeometry } from './AnswerTitleGeometry';
 import { publishArticleTitle } from './ArticleTitleBar';
 import { FeedContentSummary } from './components/FeedContentSummary';
 import { HotCommentSection } from './components/HotCommentSection';
@@ -14,6 +15,7 @@ import {
   AppPageStatusPanel,
   FeedPullDownIndicatorHost,
   FLOATING_TITLE_BAR_OFFSET,
+  ROOT_TITLE_BAR_CONTENT_HEIGHT,
   PULL_REFRESH_PULL_DOWN_RATIO,
   PULL_REFRESH_TRIGGER_OFFSET_VP,
   pullDownRefreshPlaceholder
@@ -124,6 +126,7 @@ interface AnswerPaneViewport {
   offset: number;
   atTop: boolean;
   atBottom: boolean;
+  prepared: boolean;
 }
 
 @Component
@@ -154,7 +157,7 @@ struct ContentDetailPage {
   private answerSwitchWaitTimer: number = -1;
   private readonly answerPanePreparation: AnswerPanePreparation = new AnswerPanePreparation();
   private readonly answerPaneViewports: Map<string, AnswerPaneViewport> = new Map();
-  private readonly answerPaneTitleHeights: Map<string, number> = new Map();
+  private readonly answerTitleGeometry: AnswerTitleGeometry = new AnswerTitleGeometry();
   /** 正文存在选区（长按建词/拖选扩展中）：过滑 pan 让位，防止拖选位移被误判为切换。 */
   private bodyTextSelectionActive: boolean = false;
   @StorageProp('resolvedThemeColor') @Watch('onResolvedThemeColorChanged') private resolvedThemeColor: string =
@@ -184,7 +187,7 @@ struct ContentDetailPage {
   private answerFabPreferences?: AppPreferencesStore = undefined;
   /** 底部操作栏实测高度（vp）：悬浮按钮下拖下限 = 默认底距 - 栏高 - 间隔。 */
   @State private bottomActionBarHeightVp: number = 0;
-  @StorageProp('systemFontSizeScale') private systemFontSizeScale: number = 1;
+  @StorageProp('systemFontSizeScale') @Watch('syncAnswerTitle') private systemFontSizeScale: number = 1;
   @StorageProp('readerActiveRouteKey') @Watch('onReaderOwnerChanged') private readerVisibleOwner: string = '';
   @StorageProp('loginFeedReloadTick') @Watch('onLoginChanged') private loginTick: number = 0;
   /** 全屏图片查看器：正文/评论图点击后经 AppStorage 广播，在页面根 Stack 叠层渲染
@@ -264,10 +267,10 @@ struct ContentDetailPage {
    * （详情页 Ask 面板与设置页改动互见），默认询问并记住。 */
   @StorageProp('answerDoubleTapAction') private answerDoubleTapAction: AnswerDoubleTapAction =
     AnswerDoubleTapAction.ASK;
-  @StorageProp('titleAutoHide') private titleAutoHide: boolean = false;
+  @StorageProp('titleAutoHide') @Watch('onTitleAutoHideChanged') private titleAutoHide: boolean = false;
   /** 问题标题并入顶栏（外观设置）：开启后回答页正文信息头不再重复展示问题标题，
    *  首屏即由顶栏承载（两行，过长省略），滚动后折叠为单行 + 答主。 */
-  @StorageProp('questionInTitleBar') private questionInTitleBar: boolean = false;
+  @StorageProp('questionInTitleBar') @Watch('onAnswerTitleLayoutChanged') private questionInTitleBar: boolean = false;
   @StorageProp('autoHideArticleBottomBar') private autoHideArticleBottomBar: boolean = false;
   @StorageProp('buttonSkipAnswer') private buttonSkipAnswer: boolean = true;
   @StorageProp('autoHideSkipAnswerButton') private autoHideSkipAnswerButton: boolean = true;
@@ -324,7 +327,7 @@ struct ContentDetailPage {
   /** AppShell Back 拦截发出的"先退沉浸式"信号（跨页面信号必须走 AppStorage 广播）。 */
   @StorageProp('detailImmersiveExitTick') @Watch('onImmersiveExitSignal') private immersiveExitTick: number = 0;
   /** 状态栏高度（vp，EntryAbility 广播）：沉浸式隐藏顶栏后正文的顶部留空。 */
-  @StorageProp('statusBarHeight') private statusBarHeightVp: number = 0;
+  @StorageProp('statusBarHeight') @Watch('syncAnswerTitle') private statusBarHeightVp: number = 0;
   /** 底部导航条（安全区）高度（vp）：整页级"下一答"预览卡的底部留白基准（对齐上游 systemBars 底边距）。 */
   @StorageProp('bottomRectHeight') private bottomRectHeightVp: number = 0;
   /** 设备支持沉浸材质：玻璃胶囊走 HDS 画布，否则回落组件模糊。 */
@@ -695,6 +698,7 @@ struct ContentDetailPage {
     AppStorage.setOrCreate('detailImmersiveActive', this.immersiveReading);
     // 真全屏：沉浸中隐藏状态栏（对齐上游 WindowInsetsController.hide(statusBars)）。
     setStatusBarHidden(this.immersiveReading);
+    this.onAnswerTitleLayoutChanged();
   }
 
   /** 全屏图片查看器打开时同步隐藏状态栏（对齐沉浸阅读的真全屏处理），关闭时恢复。 */
@@ -1089,7 +1093,7 @@ struct ContentDetailPage {
       // 上层：主内容，跟随 overscroll 偏移平移。
       Column() {
         // 回答/文章页：信息头（标题/作者/时间）入列随正文滚动（对齐上游折叠顶栏），
-        // 滚过主标题后经 AppStorage 通知 HDS 标题栏折叠为内容标题。
+        // 身份区下缘离开有效视口后，经 AppStorage 接管问题与作者摘要。
         NativeContentDocument({
           html: contentHtml(content),
           emptyMessage: contentEmptyMessage(content),
@@ -1102,7 +1106,7 @@ struct ContentDetailPage {
           candidatePane: content.kind === ContentDetailKind.ANSWER && !this.isDisplayedContent(content),
           onDocumentPrepared: (): void => { this.onAnswerDocumentPrepared(content); },
           onViewportPrepared: (ready: boolean): void => { this.onAnswerViewportPrepared(content, ready); },
-          topInsetVp: this.immersiveReading ? 0 : FLOATING_TITLE_BAR_OFFSET,
+          topInsetVp: this.contentTopInsetVp(),
           bottomInsetVp: readerBottomInsetVp(this.bottomActionBarHeightVp, this.immersiveReading),
           onVideoOpen: (videoId: string): void => { if (this.isDisplayedContent(content)) { this.openVideo(videoId); } },
           onLinkClick: (url: string): void => { if (this.isDisplayedContent(content)) { this.openContentLink(url); } },
@@ -1460,53 +1464,94 @@ struct ContentDetailPage {
       .catch((_error: Object): void => {});
   }
 
+  private contentTopInsetVp(): number {
+    return this.immersiveReading ? 0 : Math.max(FLOATING_TITLE_BAR_OFFSET,
+      this.statusBarHeightVp + ROOT_TITLE_BAR_CONTENT_HEIGHT);
+  }
+
+  private onAnswerTitleLayoutChanged(): void {
+    for (const pane of this.answerPanes) {
+      const key = this.answerDocumentKey(pane);
+      const wasReady = this.answerPanePreparation.ready(key);
+      this.answerPanePreparation.viewportPrepared(key, this.answerPaneViewports.get(key)?.prepared === true &&
+        this.answerTitleGeometry.measured(key, this.answerIdentityLayout()));
+      if (wasReady !== this.answerPanePreparation.ready(key)) { this.answerPaneRevision += 1; }
+    }
+    this.syncAnswerTitle();
+  }
+
+  private answerIdentityLayout(): string {
+    return this.immersiveReading ? 'immersive' : (this.questionInTitleBar ? 'persistent' : 'body');
+  }
+
+  private measureAnswerIdentity(content: LoadedContentDetail, area: Area): void {
+    const key = this.answerDocumentKey(content);
+    if (content.kind !== ContentDetailKind.ANSWER || !this.answerPanePreparation.has(key)) { return; }
+    if (!this.answerTitleGeometry.measure(key, this.answerIdentityLayout(), Number(area.height))) { return; }
+    if (this.answerPaneViewports.get(key)?.prepared && this.answerPanePreparation.viewportPrepared(key, true)) {
+      this.answerPaneRevision += 1;
+    }
+    if (this.isDisplayedContent(content)) { this.syncAnswerTitle(); }
+  }
+
+  @Builder
+  private contentIdentity(content: LoadedContentDetail) {
+    Column({ space: $r('app.float.spacing_small') }) {
+      // 主标题保留在正文信息头：回答页显示问题标题（随正文滚动、完整不截断），
+      // 问题页显示问题标题，文章页显示文章标题，避免仅依赖通用路由标题。
+      // 回答页开启"问题标题集成到顶栏"后标题改由 HDS 顶栏常驻，这里不再重复；
+      // 未开启时标题可点击进入问题页（与顶栏折叠态标题一致）。
+      if (contentContextTitle(content).length > 0 &&
+        !(content.kind === ContentDetailKind.ANSWER && this.questionInTitleBar)) {
+        Text(contentContextTitle(content))
+          .id(`${content.kind}_detail_context_title`)
+          .fontSize(content.kind === ContentDetailKind.ARTICLE
+            ? $r('app.float.reader_title_font_size') : $r('app.float.heading_font_size'))
+          .lineHeight(content.kind === ContentDetailKind.ARTICLE
+            ? $r('app.float.reader_title_line_height') : 28)
+          .fontWeight(FontWeight.Bold)
+          .fontColor($r('app.color.primary_text'))
+          .copyOption(CopyOptions.LocalDevice)
+          .accessibilityDescription(content.kind === ContentDetailKind.ANSWER ? '点击查看问题和全部回答' : '')
+          .width('100%')
+          // 标题到作者为 18vp（外层 space 10 + margin 8），作者内部仍保持紧凑。
+          .margin({ bottom: content.kind !== ContentDetailKind.QUESTION &&
+            contentAuthorName(content).length > 0 ? 8 : 0 })
+          .onAreaChange((_oldArea: Area, newArea: Area): void => {
+            const height = Number(newArea.height);
+            if (this.isDisplayedContent(content) && height > 0 && Math.abs(height - this.contentTitleHeightVp) > 1) {
+              this.contentTitleHeightVp = height;
+            }
+          })
+          .onClick((): void => {
+            if (this.isDisplayedContent(content) && content.kind === ContentDetailKind.ANSWER && content.value.questionId.length > 0) {
+              this.navigate({ name: AppDestinationName.QUESTION, id: content.value.questionId });
+            }
+          })
+      }
+
+      // 回答/文章页作者信息随信息头滚动（对齐上游展开顶栏）：头像 + 名称 + 一句话简介。
+      if (content.kind === ContentDetailKind.ANSWER || content.kind === ContentDetailKind.ARTICLE) {
+        this.contentHeaderAuthorRow(content)
+      }
+
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    .onAreaChange((_oldArea: Area, area: Area): void => { this.measureAnswerIdentity(content, area); })
+  }
+
   @Builder
   private contentHeader(content: LoadedContentDetail) {
     if ((content.kind === ContentDetailKind.ANSWER || content.kind === ContentDetailKind.ARTICLE) &&
       this.immersiveReading) {
       // 沉浸式：收起问题标题/时间/统计等完整信息头，仅留窄作者行（对齐上游 isImmersiveMode 分支）。
-      this.immersiveAuthorRow(content)
+      Column() { this.immersiveAuthorRow(content) }
+        .width('100%')
+        .onAreaChange((_oldArea: Area, area: Area): void => { this.measureAnswerIdentity(content, area); })
     } else {
       Column({ space: $r('app.float.spacing_small') }) {
-        // 主标题保留在正文信息头：回答页显示问题标题（随正文滚动、完整不截断），
-        // 问题页显示问题标题，文章页显示文章标题，避免仅依赖通用路由标题。
-        // 回答页开启"问题标题集成到顶栏"后标题改由 HDS 顶栏常驻，这里不再重复；
-        // 未开启时标题可点击进入问题页（与顶栏折叠态标题一致）。
-        if (contentContextTitle(content).length > 0 &&
-          !(content.kind === ContentDetailKind.ANSWER && this.questionInTitleBar)) {
-          Text(contentContextTitle(content))
-            .id(`${content.kind}_detail_context_title`)
-            .fontSize(content.kind === ContentDetailKind.ARTICLE
-              ? $r('app.float.reader_title_font_size') : $r('app.float.heading_font_size'))
-            .lineHeight(content.kind === ContentDetailKind.ARTICLE
-              ? $r('app.float.reader_title_line_height') : 28)
-            .fontWeight(FontWeight.Bold)
-            .fontColor($r('app.color.primary_text'))
-            .copyOption(CopyOptions.LocalDevice)
-            .width('100%')
-            // 标题到作者为 18vp（外层 space 10 + margin 8），作者内部仍保持紧凑。
-            .margin({ bottom: content.kind !== ContentDetailKind.QUESTION &&
-              contentAuthorName(content).length > 0 ? 8 : 0 })
-            .onAreaChange((_oldArea: Area, newArea: Area): void => {
-              const height = Number(newArea.height);
-              if (content.kind === ContentDetailKind.ANSWER && this.answerPanePreparation.has(this.answerDocumentKey(content))) {
-                this.answerPaneTitleHeights.set(this.answerDocumentKey(content), height);
-              }
-              if (this.isDisplayedContent(content) && height > 0 && Math.abs(height - this.contentTitleHeightVp) > 1) {
-                this.contentTitleHeightVp = height;
-              }
-            })
-            .onClick((): void => {
-              if (content.kind === ContentDetailKind.ANSWER && content.value.questionId.length > 0) {
-                this.navigate({ name: AppDestinationName.QUESTION, id: content.value.questionId });
-              }
-            })
-        }
-
-        // 回答/文章页作者信息随信息头滚动（对齐上游展开顶栏）：头像 + 名称 + 一句话简介。
-        if (content.kind === ContentDetailKind.ANSWER || content.kind === ContentDetailKind.ARTICLE) {
-          this.contentHeaderAuthorRow(content)
-        }
+        this.contentIdentity(content)
 
         // 时间与统计归为次要信息组，避免每个字段都占用一段组间留白。
         Column({ space: $r('app.float.spacing_xsmall') }) {
@@ -1774,42 +1819,41 @@ struct ContentDetailPage {
     }
   }
 
-  /** 回答页顶栏折叠阈值：正文滚过信息头里的问题标题（高度经 onAreaChange 实测，未测得前按 64vp 兜底）。
-   * 开启"问题标题集成到顶栏"后信息头已无标题，正文从首屏起就在顶栏下方，
-   * 稍微滚动即折叠为单行 + 答主并出磨砂带，避免两行标题与滚到其下的正文压字。 */
-  private answerCollapseThresholdVp(): number {
-    if (this.questionInTitleBar) {
-      return 2;
-    }
-    return this.contentTitleHeightVp > 0 ? this.contentTitleHeightVp + 8 : 64;
+  /** 只从已提交正文发布路由标题；候选测量保留在自己的 id + generation 下。 */
+  private syncAnswerTitle(): void {
+    const content = this.content;
+    if (content?.kind !== ContentDetailKind.ANSWER || !this.isDisplayedContent(content)) { return; }
+    const key = this.answerDocumentKey(content);
+    const offset = this.answerPaneViewports.get(key)?.offset ?? 0;
+    const state = this.answerTitleGeometry.resolve(key, this.answerIdentityLayout(), offset,
+      this.contentTopInsetVp(), this.immersiveReading || (this.titleAutoHide && this.chromeHiddenByScroll)
+        ? 0 : this.contentTopInsetVp(), this.questionInTitleBar, contentAuthorName(content).length > 0);
+    this.answerQuestionScrolled = state.compact;
+    publishAnswerTitle({
+      id: this.contentId,
+      activeAnswerId: content.value.id,
+      documentKey: key,
+      questionId: content.value.questionId,
+      questionTitle: contentContextTitle(content),
+      authorName: contentAuthorName(content),
+      authorAvatarUrl: contentAuthorAvatarUrl(content),
+      authorBadgeIconUrl: contentAuthorBadge(content)?.iconUrl ?? '',
+      scrolled: state.compact,
+      authorVisible: state.authorVisible,
+      materialVisible: state.materialVisible
+    });
   }
 
-  /** 回答页顶栏折叠联动：正文滚过信息头标题（高度经 onAreaChange 实测，未测得前用 64vp 兜底）
-   * 即折叠，滚回复原；经 AppStorage 广播给 HDS 标题栏（同问题页 160px 阈值模式）。
-   * 通道键固定用路由 contentId（标题栏按 destination.id 查找，过滑切换回答不改路由，
-   * activeContentId 会随切换漂移导致顶栏读到陈旧条目）；闭包捕获的 content 是构造时
-   * 的克隆（@Builder 传值不更新已挂载子组件属性，且控制器每次 emit 都换新克隆），
-   * 陈旧判定只能按内容 id 比较——id 不同才说明是切换期间的陈旧回调，直接丢弃。 */
   private updateAnswerTitleScrolled(content: LoadedContentDetail, offset: number): void {
-    if (content.kind !== ContentDetailKind.ANSWER || content.value.id !== this.content?.value.id) {
-      return;
-    }
-    const threshold = this.answerCollapseThresholdVp();
-    const scrolled = offset > threshold;
-    if (scrolled !== this.answerQuestionScrolled) {
-      this.answerQuestionScrolled = scrolled;
-      this.getUIContext().animateTo({ duration: 220, curve: Curve.EaseInOut }, (): void => {
-        publishAnswerTitle({
-          id: this.contentId,
-          questionId: content.value.questionId,
-          questionTitle: contentContextTitle(content),
-          authorName: contentAuthorName(content),
-          authorAvatarUrl: contentAuthorAvatarUrl(content),
-          authorBadgeIconUrl: contentAuthorBadge(content)?.iconUrl ?? '',
-          scrolled: scrolled
-        });
-      });
-    }
+    if (!this.isDisplayedContent(content)) { return; }
+    this.trackAnswerPaneViewport(content, offset);
+    this.syncAnswerTitle();
+  }
+
+  private onTitleAutoHideChanged(): void {
+    if (!this.pageActive || this.readerVisibleOwner !== readerPositionKey(this.kind, this.contentId)) { return; }
+    AppStorage.setOrCreate('detailTitleHiddenByScroll', this.titleAutoHide && this.chromeHiddenByScroll);
+    this.syncAnswerTitle();
   }
 
   private updateChromeHiddenByScroll(offset: number): void {
@@ -1832,6 +1876,7 @@ struct ContentDetailPage {
     if (atBottom && this.chromeHiddenByScroll) {
       this.chromeHiddenByScroll = false;
       AppStorage.setOrCreate('detailTitleHiddenByScroll', this.titleAutoHide && this.chromeHiddenByScroll);
+      this.syncAnswerTitle();
     }
   }
 
@@ -1869,7 +1914,7 @@ struct ContentDetailPage {
       NativeContentDocument({
         html: contentHtml(content), emptyMessage: contentEmptyMessage(content), collapsible: true,
         linkCardMetaRepository: this.linkCardMetaRepository,
-        topInsetVp: this.immersiveReading ? 0 : FLOATING_TITLE_BAR_OFFSET,
+        topInsetVp: this.contentTopInsetVp(),
         bottomInsetVp: readerBottomInsetVp(this.bottomActionBarHeightVp, this.immersiveReading),
         onVideoOpen: (videoId: string): void => this.openVideo(videoId),
         onLinkClick: (url: string): void => this.openContentLink(url),
@@ -2605,6 +2650,7 @@ struct ContentDetailPage {
         void this.controller.load(this.kind, this.activeContentId);
       } else {
         this.publishActiveAnswerDocument();
+        this.syncAnswerTitle();
         this.prefetchNeighborAnswer(false);
       }
     } else {
@@ -2624,15 +2670,13 @@ struct ContentDetailPage {
   private setAnswerPanes(panes: LoadedContentDetail[]): void {
     const keys = panes.map((pane: LoadedContentDetail): string => this.answerDocumentKey(pane));
     this.answerPanePreparation.retain(keys);
+    this.answerTitleGeometry.retain(keys);
     for (const key of Array.from(this.answerPaneViewports.keys())) {
       if (!keys.includes(key)) { this.answerPaneViewports.delete(key); }
     }
-    for (const key of Array.from(this.answerPaneTitleHeights.keys())) {
-      if (!keys.includes(key)) { this.answerPaneTitleHeights.delete(key); }
-    }
     for (const key of keys) {
       if (!this.answerPaneViewports.has(key)) {
-        this.answerPaneViewports.set(key, { offset: 0, atTop: true, atBottom: false });
+        this.answerPaneViewports.set(key, { offset: 0, atTop: true, atBottom: false, prepared: false });
       }
     }
     this.answerPanes = panes;
@@ -2681,8 +2725,14 @@ struct ContentDetailPage {
   }
 
   private onAnswerViewportPrepared(content: LoadedContentDetail, ready: boolean): void {
-    if (this.pageActive && this.answerPanePreparation.viewportPrepared(this.answerDocumentKey(content), ready)) {
+    const key = this.answerDocumentKey(content);
+    const viewport = this.answerPaneViewports.get(key);
+    if (!this.pageActive || viewport === undefined) { return; }
+    viewport.prepared = ready;
+    if (this.answerPanePreparation.viewportPrepared(key,
+      ready && this.answerTitleGeometry.measured(key, this.answerIdentityLayout()))) {
       this.answerPaneRevision += 1;
+      if (ready && this.isDisplayedContent(content)) { this.syncAnswerTitle(); }
     }
   }
 
@@ -2791,8 +2841,7 @@ struct ContentDetailPage {
       this.activeContentId = id;
       this.contentAtBottom = position?.atBottom ?? false;
       this.contentAtTop = position?.atTop ?? true;
-      this.contentTitleHeightVp = this.answerPaneTitleHeights.get(key) ?? 0;
-      this.answerQuestionScrolled = (position?.offset ?? 0) > this.answerCollapseThresholdVp();
+      // 标题在 controller 同步发布正式内容时读取候选自己的几何与位置。
       this.chromeHiddenByScroll = false;
       this.lastContentScrollOffset = position?.offset ?? 0;
       this.favoriteDialogShown = false;
@@ -3619,16 +3668,7 @@ struct ContentDetailPage {
         publishQuestionTitle({ id: this.activeContentId, title: state.content.value.title, scrolled: this.questionScrolled });
       }
       if (state.content.kind === ContentDetailKind.ANSWER) {
-        const questionTitle = contentContextTitle(state.content);
-        publishAnswerTitle({
-          id: this.contentId,
-          questionId: state.content.value.questionId,
-          questionTitle: questionTitle,
-          authorName: contentAuthorName(state.content),
-          authorAvatarUrl: contentAuthorAvatarUrl(state.content),
-          authorBadgeIconUrl: contentAuthorBadge(state.content)?.iconUrl ?? '',
-          scrolled: this.answerQuestionScrolled
-        });
+        this.syncAnswerTitle();
       }
       if (state.content.kind === ContentDetailKind.ARTICLE) {
         publishArticleTitle({

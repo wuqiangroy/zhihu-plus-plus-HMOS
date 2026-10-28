@@ -79,12 +79,12 @@ function pageFixture(repository = {getAnswer: async id => answer(id), cancel() {
     'answerDocumentKey', 'setAnswerPanes', 'candidatePane', 'mountAnswerCandidate', 'unmountAnswerCandidate',
     'onAnswerDocumentPrepared', 'onAnswerViewportPrepared', 'trackAnswerPaneViewport', 'trackAnswerPaneEdges',
     'beginAnswerSwitchWait', 'dismissAnswerSwitchWait', 'prepareSwitchAnswer', 'cancelAnswerDrag',
-    'answerPageVisible', 'publishActiveAnswerDocument', 'onReaderOwnerChanged', 'answerPaneTranslate', 'answerPaneVisible', 'answerSwitchPageTranslate', 'answerSwitchExtentVp', 'applyOverscrollOffset'];
+    'onAnswerTitleLayoutChanged', 'contentTopInsetVp', 'answerIdentityLayout', 'measureAnswerIdentity', 'updateAnswerTitleScrolled', 'syncAnswerTitle', 'answerPageVisible', 'publishActiveAnswerDocument', 'onReaderOwnerChanged', 'answerPaneTranslate', 'answerPaneVisible', 'answerSwitchPageTranslate', 'answerSwitchExtentVp', 'applyOverscrollOffset'];
   const Harness = methodHarness(pages + 'ContentDetailPages.ets', names[0],
-    {AppStorage: storage, ContentDetailKind, ContentDetailPhase, acceptsContentDocumentEvent, readerPositionKey: (kind, id) => kind + ':' + id});
+    {AppStorage: storage, ContentDetailKind, ContentDetailPhase, acceptsContentDocumentEvent, readerPositionKey: (kind, id) => kind + ':' + id, FLOATING_TITLE_BAR_OFFSET: 94, ROOT_TITLE_BAR_CONTENT_HEIGHT: 56, contentAuthorName: c => c.value.author?.name ?? '', contentContextTitle: c => c.value.questionTitle ?? '', contentAuthorAvatarUrl: () => '', contentAuthorBadge: () => undefined, publishAnswerTitle: value => broadcasts.push({key: 'answerTitle', value})});
   for (const name of names.slice(1)) {
     Harness.prototype[name] = methodHarness(pages + 'ContentDetailPages.ets', name,
-      {AppStorage: storage, ContentDetailKind, ContentDetailPhase, acceptsContentDocumentEvent, readerPositionKey: (kind, id) => kind + ':' + id, SessionStatus: {AUTHENTICATED: 'authenticated'}, setTimeout, clearTimeout}).prototype[name];
+      {AppStorage: storage, ContentDetailKind, ContentDetailPhase, acceptsContentDocumentEvent, readerPositionKey: (kind, id) => kind + ':' + id, FLOATING_TITLE_BAR_OFFSET: 94, ROOT_TITLE_BAR_CONTENT_HEIGHT: 56, contentAuthorName: c => c.value.author?.name ?? '', contentContextTitle: c => c.value.questionTitle ?? '', contentAuthorAvatarUrl: () => '', contentAuthorBadge: () => undefined, publishAnswerTitle: value => broadcasts.push({key: 'answerTitle', value}), SessionStatus: {AUTHENTICATED: 'authenticated'}, setTimeout, clearTimeout}).prototype[name];
   }
   const page = new Harness();
   const opened = [];
@@ -95,6 +95,7 @@ function pageFixture(repository = {getAnswer: async id => answer(id), cancel() {
       !page.answerPanes.some(pane => page.answerDocumentKey(pane) === page.answerDocumentKey(state.content))) {
       page.setAnswerPanes([state.content]);
     }
+    if (state.content?.kind === ContentDetailKind.ANSWER) page.syncAnswerTitle();
   });
   const seed = {phase: 'ready', items: ['1', '2', '3'].map(id => ({feedItem: {target: answer(id)}})),
     loadingMore: false, canLoadMore: false, sortOrder: 'default', errorMessage: '', requiresLogin: false};
@@ -105,19 +106,21 @@ function pageFixture(repository = {getAnswer: async id => answer(id), cancel() {
     pageActive: true, contentId: '1', readerVisibleOwner: 'answer:1', activeContentId: '1', phase: 'ready', controller, answerQuestionId: '123',
     navigatorBusy: false, interactionPending: false, answerSwitchEpoch: 0, favoriteStateEpoch: 0,
     answerPanes: [], answerPaneScope: 1, candidateDirection: 0, answerPaneRevision: 0,
-    answerSwitchWaitTimer: -1, answerPaneViewports: new Map(), answerPaneTitleHeights: new Map(),
+    answerSwitchWaitTimer: -1, answerPaneViewports: new Map(), statusBarHeightVp: 0,
+    answerTitleGeometry: new (load(pages + 'AnswerTitleGeometry.ets').AnswerTitleGeometry)(),
     answerPanePreparation: new (load(pages + 'AnswerPanePreparation.ets').AnswerPanePreparation)(),
     session: {getState: () => ({status: 'authenticated'})}, answerDataSource: {replace() {}}, ensureAnswers() {}, answerViewportWidthVp: 360,
     answerViewportHeightVp: 800, answerViewportTimer: -1, ensureAnswerPrefetcher() {},
     answerPrefetcher: prefetchRepository ? new AnswerDetailPrefetcher(prefetchRepository) : undefined,
     voteController: {deactivate() {voteDeactivated = true;}},
-    animateOverscrollTo: async () => {}, answerCollapseThresholdVp: () => 64,
+    animateOverscrollTo: async () => {},
     answerSwitchMode: 'horizontal', answerOverscrollOffset: 0, resetAnswerOverscroll() {}, prefetchNeighborAnswer() {},
     getUIContext: () => ({getPromptAction: () => ({showToast(item) {messages.push(item.message);}})})});
   page.automaticallyPrepareCandidate = true;
   const mount = page.mountAnswerCandidate.bind(page);
   page.mountAnswerCandidate = (content, direction) => {
     mount(content, direction);
+    if (page.automaticallyMeasureCandidate !== false) page.measureAnswerIdentity(content, {height: 100});
     if (page.automaticallyPrepareCandidate) queueMicrotask(() => {
       page.onAnswerDocumentPrepared(content);
       page.onAnswerViewportPrepared(content, true);
@@ -630,6 +633,102 @@ contract('hidden-page-defers-account-refresh-until-its-route-is-visible', false,
     assert.equal(fixture.page.sessionReloadPending, false);
     assert.deepEqual(fixture.opened, ['answer:1', 'answer:1']);
   } finally {fixture.dispose();}
+});
+contract('candidate-viewport-waits-for-identity-measurement-before-title-handoff', false, async () => {
+  const fixture = pageFixture();
+  try {
+    await fixture.controller.load(ContentDetailKind.ANSWER, '1');
+    fixture.page.automaticallyMeasureCandidate = false;
+    const switching = fixture.page.applyAnswerMove(1); await tick();
+    const candidate = fixture.page.candidatePane();
+    assert(candidate); assert.equal(fixture.page.answerPanePreparation.ready(fixture.page.answerDocumentKey(candidate)), false);
+    assert.equal(fixture.page.activeContentId, '1');
+    fixture.page.measureAnswerIdentity(candidate, {height: 100});
+    assert.equal(await switching, true); assert.equal(fixture.page.activeContentId, '2');
+  } finally {fixture.dispose();}
+});
+contract('title-mode-change-invalidates-candidate-until-its-identity-is-remeasured', false, async () => {
+  const fixture = pageFixture();
+  try {
+    await fixture.controller.load(ContentDetailKind.ANSWER, '1');
+    const candidate = await fixture.page.prepareSwitchAnswer('2', 1, fixture.page.answerSwitchEpoch); await tick();
+    const key = fixture.page.answerDocumentKey(candidate);
+    assert.equal(fixture.page.answerPanePreparation.ready(key), true);
+    fixture.page.questionInTitleBar = true; fixture.page.onAnswerTitleLayoutChanged();
+    assert.equal(fixture.page.answerPanePreparation.ready(key), false);
+    fixture.page.measureAnswerIdentity(candidate, {height: 40});
+    assert.equal(fixture.page.answerPanePreparation.ready(key), true);
+  } finally {fixture.dispose();}
+});
+contract('title-publishes-route-key-with-candidate-geometry-and-committed-identity', false, async () => {
+  const fixture = pageFixture({getAnswer: async id => ({...answer(id), questionTitle: 'question', author: {name: 'author-' + id}}), cancel() {}});
+  try {
+    await fixture.controller.load(ContentDetailKind.ANSWER, '1');
+    const original = fixture.page.content;
+    fixture.page.measureAnswerIdentity(original, {height: 100});
+    fixture.page.updateAnswerTitleScrolled(original, 150);
+    assert.equal(fixture.broadcasts.at(-1).value.authorVisible, true);
+    const candidate = await fixture.page.prepareSwitchAnswer('2', 1, fixture.page.answerSwitchEpoch);
+    fixture.page.measureAnswerIdentity(candidate, {height: 160});
+    fixture.page.trackAnswerPaneViewport(candidate, 80);
+    assert.equal(fixture.broadcasts.at(-1).value.activeAnswerId, '1');
+    assert.equal(await fixture.page.applyAnswerMove(1), true);
+    const committed = fixture.broadcasts.filter(item => item.key === 'answerTitle').at(-1).value;
+    assert.equal(committed.id, '1'); assert.equal(committed.activeAnswerId, '2');
+    assert.equal(committed.authorName, 'author-2'); assert.equal(committed.authorVisible, false);
+    fixture.page.updateAnswerTitleScrolled(original, 1000);
+    assert.equal(fixture.broadcasts.filter(item => item.key === 'answerTitle').at(-1).value, committed);
+  } finally {fixture.dispose();}
+});
+contract('layout-change-updates-title-without-scroll-and-rejects-pruned-generation', false, async () => {
+  const fixture = pageFixture({getAnswer: async id => ({...answer(id), author: {name: 'author'}}), cancel() {}});
+  try {
+    await fixture.controller.load(ContentDetailKind.ANSWER, '1');
+    const original = fixture.page.content;
+    fixture.page.measureAnswerIdentity(original, {height: 60});
+    fixture.page.updateAnswerTitleScrolled(original, 100);
+    assert.equal(fixture.broadcasts.at(-1).value.authorVisible, true);
+    fixture.page.measureAnswerIdentity(original, {height: 150});
+    assert.equal(fixture.broadcasts.at(-1).value.authorVisible, false);
+    await fixture.controller.load(ContentDetailKind.ANSWER, '1');
+    fixture.page.updateAnswerTitleScrolled(fixture.page.content, 200);
+    fixture.page.measureAnswerIdentity(original, {height: 1});
+    fixture.page.updateAnswerTitleScrolled(original, 1000);
+    assert.equal(fixture.broadcasts.at(-1).value.authorVisible, false);
+    fixture.page.measureAnswerIdentity(fixture.page.content, {height: 100});
+    assert.equal(fixture.broadcasts.at(-1).value.authorVisible, true);
+  } finally {fixture.dispose();}
+});
+const preferencesSource = ts.createSourceFile('preferences.ets', read('data/src/main/ets/preferences/AppPreferencesStore.ets'), ts.ScriptTarget.Latest, true);
+const preferenceNames = new Set(['AnswerSwitchMode', 'ShareActionMode', 'defaultExperiencePreferences', 'normalizeExperiencePreferences', 'normalizeBottomBarItems']);
+const preferencesModule = {exports: {}};
+vm.runInNewContext(compile(preferencesSource.statements.filter(node => preferenceNames.has(node.name?.text)).map(node => node.getFullText(preferencesSource)).join('\n')), {exports: preferencesModule.exports});
+contract('old-and-invalid-title-preferences-load-defaults-and-existing-booleans-survive', false, async () => {
+  let saved = {};
+  const Harness = methodHarness('data/src/main/ets/preferences/AppPreferencesStore.ets', 'loadExperiencePreferences', {
+    ...preferencesModule.exports, PREFERENCES_NAME: 'test', preferences: {getPreferences: async () => ({get: async (key, fallback) => saved[key] ?? fallback})}
+  });
+  const store = new Harness(); store.saveQueue = Promise.resolve();
+  let value = await store.loadExperiencePreferences();
+  assert.equal(value.questionInTitleBar, false); assert.equal(value.titleAutoHide, false);
+  saved = {questionInTitleBar: 'true', titleAutoHide: 1}; value = await store.loadExperiencePreferences();
+  assert.equal(value.questionInTitleBar, false); assert.equal(value.titleAutoHide, false);
+  for (const questionInTitleBar of [false, true]) for (const titleAutoHide of [false, true]) {
+    saved = {questionInTitleBar, titleAutoHide}; value = await store.loadExperiencePreferences();
+    assert.equal(value.questionInTitleBar, questionInTitleBar); assert.equal(value.titleAutoHide, titleAutoHide);
+  }
+});
+contract('answer-identity-change-does-not-animate-through-old-author', false, () => {
+  let animations = 0;
+  const Harness = methodHarness(pages + 'AnswerTitleBar.ets', 'onStatesChanged', {Curve: {EaseInOut: 0}});
+  const bar = new Harness();
+  let state = {documentKey: 'a:1', scrolled: true, authorVisible: true};
+  Object.assign(bar, {documentKey: 'a:1', folded: true, authorVisible: true, state: () => state,
+    getUIContext: () => ({animateTo: (_, apply) => {animations++; apply();}})});
+  state = {documentKey: 'b:2', scrolled: false, authorVisible: false}; bar.onStatesChanged();
+  assert.equal(bar.folded, false); assert.equal(bar.authorVisible, false); assert.equal(animations, 0);
+  state = {...state, scrolled: true, authorVisible: true}; bar.onStatesChanged();
+  assert.equal(bar.folded, true); assert.equal(bar.authorVisible, true); assert.equal(animations, 1);
 });
 (async () => {
   let failed = 0;

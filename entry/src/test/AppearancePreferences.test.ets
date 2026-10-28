@@ -15,6 +15,16 @@ import {
 
 export default function appearancePreferencesTest(): void {
   describe('appearancePreferencesTest', () => {
+    it('defaultsBothTitleOptionsOffAndKeepsThemIndependent', 0, () => {
+      const value = defaultExperiencePreferences();
+      expect(value.titleAutoHide).assertFalse(); expect(value.questionInTitleBar).assertFalse();
+      value.questionInTitleBar = true;
+      expect(normalizeExperiencePreferences(value).questionInTitleBar).assertTrue();
+      expect(normalizeExperiencePreferences(value).titleAutoHide).assertFalse();
+      value.questionInTitleBar = false; value.titleAutoHide = true;
+      expect(normalizeExperiencePreferences(value).questionInTitleBar).assertFalse();
+      expect(normalizeExperiencePreferences(value).titleAutoHide).assertTrue();
+    });
     it('normalizesFloatingButtonOpacity', 0, () => {
       expect(decodeFabOpacity('80')).assertEqual(100);
       expect(decodeFabOpacity(2)).assertEqual(10);

@@ -2,7 +2,7 @@ import { updateStatusBarAppearance } from '../platform/SystemBars';
 import { QuestionTitleBar } from './QuestionTitleBar';
 import { SearchTitleBar } from './SearchTitleBar';
 import { HistoryTitleBar } from './HistoryTitleBar';
-import { AnswerTitleBar } from './AnswerTitleBar';
+import { AnswerTitleBar, AnswerTitleState } from './AnswerTitleBar';
 import { ArticleTitleBar } from './ArticleTitleBar';
 import { peopleTitleText, PeopleTitleState } from './PeopleTitleBar';
 import { CommentTitleBar, CommentTitleState, commentTitleStateId } from './CommentTitleBar';
@@ -78,7 +78,7 @@ import {
 } from './TopLevelTabs';
 import { DividerShowType, hdsMaterial, HdsNavDestination, HdsNavigation, HdsNavigationAttribute, HdsNavigationTitleMode, HdsTabsController } from '@kit.UIDesignKit';
 import { ContinuousAnswerTitleState, continuousAnswerRouteId, continuousAnswerTitle } from './ContinuousAnswerRouteState';
-import { getContinuousAnswerTitleBarStyle, getChatTitleBarStyle, getImmersiveTitleBarStyle, getPersistentImmersiveTitleBarStyle, getRootChromeTitleBarStyle } from '../common/style/NavStyles';
+import { getAnswerTitleBarStyle, getContinuousAnswerTitleBarStyle, getChatTitleBarStyle, getImmersiveTitleBarStyle, getPersistentImmersiveTitleBarStyle, getRootChromeTitleBarStyle } from '../common/style/NavStyles';
 import {
   decodeImmersiveMaterialSupport,
   ImmersiveMaterialSupportState
@@ -202,6 +202,8 @@ export struct AppShell {
   /** 回答/文章详情页沉浸式阅读中（页面广播）：隐藏 NavDestination 顶栏（对齐上游 topBar={}）。 */
   @StorageProp('detailImmersiveActive') private detailImmersiveActive: boolean = false;
   @StorageProp('detailTitleHiddenByScroll') private detailTitleHiddenByScroll: boolean = false;
+  /** 正文发布的回答标题状态，以固定路由 ID 读取。 */
+  @StorageProp('answerTitleStates') private answerTitleStates: AnswerTitleState[] = [];
   /** 连续阅读页问题标题（页面加载后广播；空串显示占位标题）。 */
   @StorageProp('continuousAnswerTitles') private continuousAnswerTitles: Array<ContinuousAnswerTitleState> = [];
   @StorageProp('peopleTitleStates') private peopleTitleStates: PeopleTitleState[] = [];
@@ -836,8 +838,9 @@ export struct AppShell {
       }
       .onShown((): void => this.setReaderRouteVisible('answer', destination.id, true))
       .onHidden((): void => this.setReaderRouteVisible('answer', destination.id, false))
-      // 同问题页：走与设置/首页一致的沉浸顶栏（静止透明、滚动出渐变模糊）。
-      .titleBar({ style: getImmersiveTitleBarStyle(this.immersiveMaterialMode(), this.immersiveMaterialSupportState()), avoidLayoutSafeArea: true, content: { stackBuilder: (): void => this.answerTitleBar(destination.id), divider: { showType: DividerShowType.OFF } } })
+      // Native 列表显式广播材质态，避免 HDS 无法观察候选树内滚动而发生正文压字。
+      .titleBar({ style: getAnswerTitleBarStyle(this.immersiveMaterialMode(), this.immersiveMaterialSupportState(),
+        this.answerTitleStates.find((state: AnswerTitleState): boolean => state.id === destination.id)?.materialVisible ?? false), avoidLayoutSafeArea: true, content: { stackBuilder: (): void => this.answerTitleBar(destination.id), divider: { showType: DividerShowType.OFF } } })
       .hideBackButton(true)
       // 沉浸式/图片查看器中隐藏顶栏（对齐上游 topBar={}）；返回键优先关查看器、再退沉浸式。
       // 回答切换过滑（纵向/横向）顶栏都保持不动，相邻回答整页从顶栏下方滑入。

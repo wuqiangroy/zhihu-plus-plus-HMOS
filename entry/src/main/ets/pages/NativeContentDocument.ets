@@ -1025,7 +1025,7 @@ export struct NativeContentDocument {
         .padding({
           left: this.readingLayout ? readerHorizontalPaddingVp(this.viewportWidthVp) : $r('app.float.page_padding'),
           right: this.readingLayout ? readerHorizontalPaddingVp(this.viewportWidthVp) : $r('app.float.page_padding'),
-          top: $r('app.float.spacing_medium')
+          top: 16
         })
         // 末尾避让随正文滚动，避免底部 padding 压缩视口、在悬浮操作栏下方形成固定留白。
         .contentEndOffset(this.bottomInsetVp)
