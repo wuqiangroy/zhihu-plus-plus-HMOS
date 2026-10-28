@@ -2249,7 +2249,7 @@ export struct AppShell {
           })
       }
       .width('100%')
-      Text('知乎Plus')
+      Text($r('app.string.EntryAbility_label'))
         .id('about_version_app_name')
         .fontSize($r('app.float.body_font_size'))
         .fontColor($r('app.color.primary_text'))
