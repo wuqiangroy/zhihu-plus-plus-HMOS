@@ -146,6 +146,7 @@ struct Index {
   @State private questionRepository?: ContentRepository = undefined;
   private questionAnswerFeedFactory: () => QuestionAnswerFeedRepository | undefined = () => undefined;
   @State private answerRepository?: ContentRepository = undefined;
+  private answerPrefetchRepositoryFactory: () => ContentRepository | undefined = () => undefined;
   @State private articleRepository?: ContentRepository = undefined;
   private continuousRepositoriesFactory: () => ContinuousAnswerRepositories = (): ContinuousAnswerRepositories =>
     new ContinuousAnswerRepositories();
@@ -233,8 +234,9 @@ struct Index {
       this.videoRepository = new DefaultVideoRepository(new ZhihuHttpClient(session));
       this.questionAnswerFeedFactory = (): QuestionAnswerFeedRepository =>
         new DefaultQuestionAnswerFeedRepository(new ZhihuHttpClient(session), blockingMatcher);
-      // 回答正文缓存 4 条：滑动切换回答时命中预取结果，避免整页重新加载。
-      this.answerRepository = new DefaultContentRepository(new ZhihuHttpClient(session), 4);
+      this.answerRepository = new DefaultContentRepository(new ZhihuHttpClient(session));
+      this.answerPrefetchRepositoryFactory = (): ContentRepository =>
+        new DefaultContentRepository(new ZhihuHttpClient(session));
       this.articleRepository = new DefaultContentRepository(new ZhihuHttpClient(session));
       this.continuousRepositoriesFactory = (): ContinuousAnswerRepositories => new ContinuousAnswerRepositories(session);
       this.peopleRepository = new DefaultPeopleRepository(new ZhihuHttpClient(session));
@@ -482,6 +484,7 @@ struct Index {
     AnswerDetailPage({
       contentId: id,
       repository: this.answerRepository,
+      answerPrefetchRepositoryFactory: this.answerPrefetchRepositoryFactory,
       linkCardMetaRepository: this.linkCardMetaRepository,
       openedContentStore: this.openedContentStore,
       historyUploader: this.readHistoryUploader,

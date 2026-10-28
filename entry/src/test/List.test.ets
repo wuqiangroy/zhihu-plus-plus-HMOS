@@ -1,3 +1,4 @@
+import answerSwitchPrefetchTest from './AnswerSwitchPrefetch.test';
 import feedWaterfallLayoutTest from './FeedWaterfallLayout.test';
 import feedFlowDataSourceTest from './FeedFlowDataSource.test';
 import continuousAnswerLifecycleTest from './ContinuousAnswerLifecycle.test';
@@ -141,6 +142,7 @@ export default function testsuite(): void {
   contentDetailRepositoryTest();
   questionAnswerFeedTest();
   contentDetailStateTest();
+  answerSwitchPrefetchTest();
   loginControllerTest();
   channelFeedRepositoryTest();
   channelFeedStateTest();

@@ -40,6 +40,7 @@ class ControlledContentRepository implements ContentRepository {
   readonly pendingQuestions: Array<PendingQuestion> = [];
   cancelCount: number = 0;
   answer: Answer = answerFixture();
+  failAnswer: boolean = false;
   article: Article = articleFixture();
 
   getQuestion(_id: string): Promise<Question> {
@@ -49,8 +50,32 @@ class ControlledContentRepository implements ContentRepository {
     });
   }
 
-  getAnswer(_id: string, _preferCache?: boolean): Promise<Answer> {
-    return Promise.resolve(this.answer);
+  getAnswer(id: string): Promise<Answer> {
+    if (this.failAnswer) { return Promise.reject(new Error('network')); }
+    // 按请求的 id 返回浅拷贝：提交校验要求候选详情与已登记的目标回答一致，
+    // 同时不得就地改写已显示正文引用的对象。
+    const source = this.answer;
+    const answer: Answer = {
+      id: id,
+      questionId: source.questionId,
+      questionTitle: source.questionTitle,
+      contentHtml: source.contentHtml,
+      excerpt: source.excerpt,
+      url: source.url,
+      voteupCount: source.voteupCount,
+      commentCount: source.commentCount,
+      createdAt: source.createdAt,
+      updatedAt: source.updatedAt,
+      author: source.author,
+      voteState: source.voteState,
+      thanksCount: source.thanksCount,
+      isThanked: source.isThanked,
+      endorsements: source.endorsements,
+      ipInfo: source.ipInfo,
+      segmentInfos: source.segmentInfos,
+      allowSegmentInteraction: source.allowSegmentInteraction
+    };
+    return Promise.resolve(answer);
   }
 
   getArticle(_id: string): Promise<Article> {
@@ -74,7 +99,7 @@ class HttpFailingContentRepository implements ContentRepository {
     throw this.failure;
   }
 
-  async getAnswer(_id: string, _preferCache?: boolean): Promise<Answer> {
+  async getAnswer(_id: string): Promise<Answer> {
     throw this.failure;
   }
 
@@ -89,6 +114,92 @@ class HttpFailingContentRepository implements ContentRepository {
 
 export default function contentDetailStateTest(): void {
   describe('contentDetailStateTest', () => {
+    it('preparesAnswerWithoutReplacingCurrentAndRejectsStaleCommit', 0, async () => {
+      const repository = new ControlledContentRepository();
+      const controller = new ContentDetailController(repository);
+      controller.activate();
+      await controller.load(ContentDetailKind.ANSWER, '2');
+      const original = controller.snapshot().content;
+      repository.failAnswer = true;
+      expect(await controller.prepareAnswer('3') === undefined).assertTrue();
+      expect(controller.snapshot().content?.loadGeneration).assertEqual(original?.loadGeneration);
+      expect(controller.preparedAnswerError().length > 0).assertTrue();
+      repository.failAnswer = false;
+      const prepared = await controller.prepareAnswer('3');
+      expect(controller.snapshot().phase).assertEqual(ContentDetailPhase.READY);
+      expect(controller.snapshot().content?.loadGeneration).assertEqual(original?.loadGeneration);
+      expect(prepared !== undefined).assertTrue();
+      if (prepared === undefined) { return; }
+      controller.deactivate();
+      expect(controller.commitPreparedAnswer(prepared)).assertFalse();
+      controller.activate();
+      const next = await controller.prepareAnswer('3');
+      if (next === undefined) { expect(false).assertTrue(); return; }
+      expect(controller.commitPreparedAnswer(next)).assertTrue();
+      expect(controller.commitPreparedAnswer(next)).assertFalse();
+      expect(controller.snapshot().content?.loadGeneration).assertEqual(next.loadGeneration);
+      controller.deactivate();
+    });
+    it('adoptsPrefetchedAnswerWithoutReplacingCurrentAndCommitsOnce', 0, async () => {
+      const repository = new ControlledContentRepository();
+      const controller = new ContentDetailController(repository);
+      controller.activate();
+      await controller.load(ContentDetailKind.ANSWER, '2');
+      const original = controller.snapshot().content;
+      const prefetched = answerFixture();
+      prefetched.id = '3';
+      const admitted = controller.admitAnswer(prefetched);
+      // 登记候选不替换当前正文、不改变阶段。
+      expect(admitted !== undefined).assertTrue();
+      expect(controller.snapshot().content?.loadGeneration).assertEqual(original?.loadGeneration);
+      expect(controller.snapshot().phase).assertEqual(ContentDetailPhase.READY);
+      if (admitted === undefined) { return; }
+      expect(admitted.value.id).assertEqual('3');
+      expect(admitted.loadGeneration !== undefined).assertTrue();
+      expect(controller.commitPreparedAnswer(admitted)).assertTrue();
+      expect(controller.snapshot().content?.value.id).assertEqual('3');
+      // 同一候选不得重复提交。
+      expect(controller.commitPreparedAnswer(admitted)).assertFalse();
+      controller.deactivate();
+    });
+    it('rejectsCommitForCandidateOtherThanAdmitted', 0, async () => {
+      const repository = new ControlledContentRepository();
+      const controller = new ContentDetailController(repository);
+      controller.activate();
+      await controller.load(ContentDetailKind.ANSWER, '2');
+      const first = answerFixture();
+      first.id = '3';
+      const admittedFirst = controller.admitAnswer(first);
+      const other = answerFixture();
+      other.id = '4';
+      const admittedOther = controller.admitAnswer(other);
+      if (admittedFirst === undefined || admittedOther === undefined) {
+        expect(false).assertTrue();
+        return;
+      }
+      // 后一次登记使先前候选失效：手势取消后不得再提交旧候选。
+      expect(controller.commitPreparedAnswer(admittedFirst)).assertFalse();
+      expect(controller.commitPreparedAnswer(admittedOther)).assertTrue();
+      expect(controller.snapshot().content?.value.id).assertEqual('4');
+      controller.deactivate();
+    });
+    it('cancelledCandidateCannotCommitOrReplaceCurrent', 0, async () => {
+      const repository = new ControlledContentRepository();
+      const controller = new ContentDetailController(repository);
+      controller.activate();
+      await controller.load(ContentDetailKind.ANSWER, '2');
+      const original = controller.snapshot().content;
+      const candidate = await controller.prepareAnswer('3');
+      expect(candidate !== undefined).assertTrue();
+      if (candidate === undefined) { return; }
+      controller.cancelPreparedAnswer();
+      expect(controller.canCommitPreparedAnswer(candidate)).assertFalse();
+      expect(controller.commitPreparedAnswer(candidate)).assertFalse();
+      expect(controller.snapshot().content?.value.id).assertEqual('2');
+      expect(controller.snapshot().content?.loadGeneration).assertEqual(original?.loadGeneration);
+      controller.deactivate();
+    });
+
     it('acceptsNewDocumentEdgesWhileRejectingDepartedDocumentEvents', 0, () => {
       const oldDetail: LoadedAnswerDetail = { kind: ContentDetailKind.ANSWER, value: answerFixture(), loadGeneration: 1 };
       const newDetail: LoadedAnswerDetail = { kind: ContentDetailKind.ANSWER, value: answerFixture(), loadGeneration: 2 };

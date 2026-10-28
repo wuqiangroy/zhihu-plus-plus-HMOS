@@ -1,3 +1,4 @@
+import { AnswerDetailPrefetcher } from './AnswerSwitchPrefetch';
 import { QuestionAnswerDataSource } from './QuestionAnswerDataSource';
 import { AnswerNavigationPreview, QuestionAnswerNavigator, stageQuestionAnswerNavigator, takeQuestionAnswerNavigator } from './QuestionAnswerNavigator';
 import { ContentImagePreview } from './NativeContentDocument';
@@ -144,7 +145,7 @@ struct ContentDetailPage {
   @State private contentAtTop: boolean = true;
   /** overscroll 原始拖动累计量（阻尼换算前）。 */
   private overscrollRawDrag: number = 0;
-  /** 横向切换提交过渡（松手后整页滑出 → 换页 → 冻结页消失）；undefined 表示无过渡。 */
+  /** 候选接纳后整页落位的展示快照；undefined 表示未进入落位动画。 */
   @State private answerSwitchTransition: AnswerSwitchTransition | undefined = undefined;
   /** 正文存在选区（长按建词/拖选扩展中）：过滑 pan 让位，防止拖选位移被误判为切换。 */
   private bodyTextSelectionActive: boolean = false;
@@ -187,6 +188,12 @@ struct ContentDetailPage {
   @StorageProp('imagePreviewUrl') @Watch('onImagePreviewChanged') private imagePreviewUrl: string = '';
   @State private authenticated: boolean = false;
   private answerNavigator?: QuestionAnswerNavigator;
+  private answerPrefetcher?: AnswerDetailPrefetcher;
+  private answerSwitchEpoch: number = 0;
+  private answerViewportWaiter?: (ready: boolean) => void;
+  private answerViewportTimer: number = -1;
+  private sessionReloadPending: boolean = false;
+  private answerQuestionId: string = '';
   private readonly answerDataSource: QuestionAnswerDataSource = new QuestionAnswerDataSource();
   private indicator?: FeedPullDownIndicatorHost = undefined;
   private questionScrolled: boolean = false;
@@ -201,6 +208,7 @@ struct ContentDetailPage {
   private answerQuestionTitleSnapshot: string = '';
   private pageActive: boolean = false;
   repository: ContentRepository | undefined = undefined;
+  answerPrefetchRepositoryFactory: () => ContentRepository | undefined = () => undefined;
   /** 推荐阅读卡片站内元数据仓库：赞同/评论计数与资源类型（正文 link-card 展示）。 */
   linkCardMetaRepository: LinkCardMetaRepository | undefined = undefined;
   openedContentStore: OpenedContentStore | undefined = undefined;
@@ -245,6 +253,7 @@ struct ContentDetailPage {
   /** 详情收藏态：任一收藏夹含此内容即已收藏（对齐上游 ArticleViewModel.isFavorited），驱动右下角书签图标 */
   @State private contentFavorited: boolean = false;
   private favoriteStateContentId: string = '';
+  private favoriteStateEpoch: number = 0;
   /** 回答尾部热门评论预览（按热度排序的根评论，最多 HOT_COMMENT_PREVIEW_LIMIT 条）。 */
   @State private hotComments: Array<CommentItem> = [];
   @State private hotCommentsLoading: boolean = false;
@@ -337,6 +346,7 @@ struct ContentDetailPage {
       this.answerNavigator = takeQuestionAnswerNavigator(this.activeContentId);
     }
     this.answerNavigator?.resume();
+    this.ensureAnswerPrefetcher();
     // 恢复"下一个回答"悬浮按钮上次拖放位（仅回答页；aboutToAppear 重入只加载一次）。
     if (this.kind === ContentDetailKind.ANSWER && !this.answerFabPositionLoaded) {
       this.loadAnswerFabPosition();
@@ -355,7 +365,8 @@ struct ContentDetailPage {
       this.controller.activate();
       this.answersController?.activate();
       this.ensureAnswers();
-      if (this.phase === ContentDetailPhase.LOADING) {
+      if (this.sessionReloadPending || this.phase === ContentDetailPhase.LOADING) {
+        this.sessionReloadPending = false;
         void this.controller.load(this.kind, this.activeContentId);
       }
       return;
@@ -394,6 +405,15 @@ struct ContentDetailPage {
   }
 
   private onLoginChanged(): void {
+    this.invalidateAnswerSwitch();
+    this.sessionReloadPending = true;
+    this.favoriteStateEpoch += 1;
+    this.favoriteStateContentId = '';
+    this.contentFavorited = false;
+    this.answerNavigator?.dispose();
+    this.answerNavigator = undefined;
+    this.voteController?.deactivate();
+    this.voteController = undefined;
     this.authenticated = this.session?.getState().status === SessionStatus.AUTHENTICATED;
     if (!this.pageActive) { return; }
     this.answersController?.deactivate();
@@ -402,10 +422,15 @@ struct ContentDetailPage {
     this.ensureAnswers();
     this.followController?.deactivate();
     this.followController = undefined;
+    this.sessionReloadPending = false;
     void this.controller?.load(this.kind, this.activeContentId);
   }
 
   aboutToDisappear(): void {
+    this.invalidateAnswerSwitch();
+    this.answerPrefetcher?.dispose();
+    this.answerPrefetcher = undefined;
+    this.favoriteStateEpoch += 1;
     this.pageActive = false;
     this.unsubscribeHoldingHand();
     this.indicator?.dispose();
@@ -679,6 +704,7 @@ struct ContentDetailPage {
   }
 
   private async refreshQuestion(): Promise<void> {
+    this.invalidateAnswerSwitch();
     this.refreshingAnswers = true;
     this.followController?.deactivate();
     this.followController = undefined;
@@ -751,14 +777,14 @@ struct ContentDetailPage {
 
       // 整页级过滑预览：相邻回答整页放在视口之外，随拖动沿切换轴（横向 X / 纵向 Y）露出。
       // 仅展示层（hitTestMode None），切换判定仍在 loadedContent 的并行手势。
-      // 提交过渡期间 LOADING 会把 content 清空，但冻结页只依赖切换快照与问题标题缓存，
-      // 仍要铺在屏上直到新正文到货——否则未命中缓存时会露出加载面板，标题也跟着消失。
+      // 步骤 2 保留既有摘要展示；准备期间正式正文保持 READY，落位后才提交正文。
+      // 步骤 3 用真实候选文档替换此展示层并保持实例键。
       if (this.kind === ContentDetailKind.ANSWER &&
         (this.content !== undefined || this.answerSwitchTransition !== undefined) &&
         (this.phase === ContentDetailPhase.READY || this.answerSwitchTransition !== undefined)) {
         if (this.answerSwitchTransition !== undefined) {
           // 提交过渡：冻结页始终铺在整页外侧，随剩余滑出动画滑入并最终覆盖全屏；
-          // 导航索引此时已前进，不能再按实时预览判断方向与内容。
+          // 提交点才推进索引，动画期间使用同一份目标预览。
           Stack({ alignContent: Alignment.Center }) {
             this.answerSwitchPage(this.answerSwitchTransition.previous)
           }
@@ -918,12 +944,13 @@ struct ContentDetailPage {
     .onAreaChange((_oldArea: Area, newArea: Area): void => {
       const width = Number(newArea.width);
       const height = Number(newArea.height);
-      if (width > 0 && Math.abs(width - this.answerViewportWidthVp) > 1) {
+      if (width >= 0 && Math.abs(width - this.answerViewportWidthVp) > 1) {
         this.answerViewportWidthVp = width;
       }
-      if (height > 0 && Math.abs(height - this.answerViewportHeightVp) > 1) {
+      if (height >= 0 && Math.abs(height - this.answerViewportHeightVp) > 1) {
         this.answerViewportHeightVp = height;
       }
+      if (width > 0 && height > 0) { this.finishAnswerViewportWait(true); }
     })
   }
 
@@ -951,6 +978,7 @@ struct ContentDetailPage {
   /** 拉取详情收藏态（对齐上游 ArticleViewModel.loadCollections）；失败静默——
    * 收藏夹弹窗打开时会取消共享仓库的在途请求，图标保持当前态即可。 */
   private refreshContentFavoriteState(): void {
+    const epoch = ++this.favoriteStateEpoch;
     const repository = this.collectionRepository;
     const session = this.session;
     if (repository === undefined || session === undefined ||
@@ -964,7 +992,7 @@ struct ContentDetailPage {
     this.favoriteStateContentId = contentId;
     repository.getContentCollections(contentType, contentId)
       .then((collections: Array<CollectionSummary>): void => {
-        if (!this.pageActive || this.favoriteStateContentId !== contentId) {
+        if (!this.pageActive || epoch !== this.favoriteStateEpoch || this.favoriteStateContentId !== contentId) {
           return;
         }
         this.contentFavorited =
@@ -1139,7 +1167,7 @@ struct ContentDetailPage {
         ? PanDirection.Horizontal : PanDirection.Vertical })
         .onActionStart((event: GestureEvent): void => {
           this.overscrollPanPrevY = this.answerSwitchMode === 'horizontal' ? event.offsetX : event.offsetY;
-          // 横向模式下起手即预取下一答正文：抬手切换时多半已命中缓存，不必整页转圈。
+          // 起手只预取已知相邻答，不推进索引或写阅读记录。
           if (this.answerSwitchMode === 'horizontal') {
             this.prefetchNeighborAnswer(false);
           }
@@ -2624,6 +2652,7 @@ struct ContentDetailPage {
   }
 
   private selectAnswerSort(index: number): void {
+    this.invalidateAnswerSwitch();
     if (index !== 0 && index !== 1) {
       return;
     }
@@ -2736,77 +2765,133 @@ struct ContentDetailPage {
   }
 
   private async moveAnswer(direction: number): Promise<void> {
-    if (this.navigatorBusy) { return; }
-    this.navigatorBusy = true;
-    this.resetAnswerOverscroll(false);
-    try {
-      await this.applyAnswerMove(direction);
-    } finally { this.navigatorBusy = false; }
+    await this.applyAnswerMove(direction);
   }
 
-  /** 执行相邻回答导航与正文加载（调用方负责 navigatorBusy 与过滑复位）；返回是否成功切到目标回答。 */
+  /** 所有切答入口共用此事务；准备和动画期间保留正式正文、索引与互动身份。 */
   private async applyAnswerMove(direction: number): Promise<boolean> {
-    const preview = direction < 0
-      ? this.answerNavigator?.previousAnswerPreview()
-      : this.answerNavigator?.nextAnswerPreview();
-    const id = await this.answerNavigator?.move(direction);
-    this.navigatorRevision += 1;
-    if (!this.pageActive) { return false; }
-    if (id === undefined) {
-      const message = this.answerNavigator?.errorMessage() ?? '';
-      this.getUIContext().getPromptAction()
-        .showToast({ message: message.length > 0 ? message : '暂时无法切换回答' });
+    const navigator = this.answerNavigator;
+    const controller = this.controller;
+    if (!this.pageActive || this.navigatorBusy || this.interactionPending ||
+      this.phase !== ContentDetailPhase.READY || navigator === undefined || controller === undefined ||
+      (direction !== -1 && direction !== 1)) { return false; }
+    this.navigatorBusy = true;
+    const epoch = ++this.answerSwitchEpoch;
+    let committed = false;
+    try {
+      const id = await navigator.prepareMove(direction);
+      if (!this.pageActive || epoch !== this.answerSwitchEpoch) { return false; }
+      if (id === undefined) {
+        this.showAnswerSwitchFailure(navigator.errorMessage());
+        return false;
+      }
+      this.ensureAnswerPrefetcher();
+      const prefetcher = this.answerPrefetcher;
+      const answer = prefetcher === undefined ? undefined : await prefetcher.request(id, true);
+      if (!this.pageActive || epoch !== this.answerSwitchEpoch) { return false; }
+      const prepared = prefetcher === undefined ? await controller.prepareAnswer(id)
+        : answer !== undefined && answer.id === id && answer.questionId === this.answerQuestionId
+          ? controller.admitAnswer(answer) : undefined;
+      if (!this.pageActive || epoch !== this.answerSwitchEpoch) { return false; }
+      if (prepared === undefined) {
+        this.showAnswerSwitchFailure(controller.preparedAnswerError());
+        return false;
+      }
+      // 步骤 2 等待承载页面的实测视口；步骤 3 再接入候选 Native 文档的就绪协议。
+      const ready = await this.waitForAnswerViewport();
+      if (!this.pageActive || epoch !== this.answerSwitchEpoch) { return false; }
+      if (!ready) { this.showAnswerSwitchFailure('回答视口准备超时，请重试'); return false; }
+      const previous = direction < 0;
+      this.answerSwitchTransition = { previous: previous, preview: this.answerPreviewData(previous) };
+      this.overscrollRawDrag = 0;
+      await this.animateOverscrollTo((previous ? 1 : -1) * this.answerSwitchExtentVp());
+      if (!this.pageActive || epoch !== this.answerSwitchEpoch || this.interactionPending ||
+        this.answerViewportWidthVp <= 0 || this.answerViewportHeightVp <= 0 || !navigator.canCommitMove(id) || !controller.canCommitPreparedAnswer(prepared)) { return false; }
+      // 两侧校验后同步提交，中间没有异步边界或外部回调。
+      if (!navigator.commitMove(id)) { return false; }
+      this.voteController?.deactivate();
+      this.voteController = undefined;
+      this.activeContentId = id;
+      this.contentAtBottom = false;
+      this.contentAtTop = true;
+      this.answerQuestionScrolled = false;
+      this.chromeHiddenByScroll = false;
+      this.lastContentScrollOffset = 0;
+      this.favoriteDialogShown = false;
+      this.bodyTextSelectionActive = false;
+      this.interactionErrorMessage = '';
+      this.interactionRequiresLogin = false;
+      this.contentFavorited = false;
+      this.favoriteStateContentId = '';
+      AppStorage.setOrCreate('detailTitleHiddenByScroll', false);
+      committed = controller.commitPreparedAnswer(prepared);
+      this.navigatorRevision += 1;
+      prefetcher?.forget(id);
+      return committed;
+    } catch (_error) {
+      if (this.pageActive && epoch === this.answerSwitchEpoch) { this.showAnswerSwitchFailure('暂时无法切换回答，请重试'); }
       return false;
+    } finally {
+      if (epoch === this.answerSwitchEpoch) {
+        try {
+          if (!committed) { await this.animateOverscrollTo(0); }
+        } catch (_error) {
+          // 窗口失效或动画 API 异常也必须释放事务，不让回弹失败锁住下一次切答。
+        } finally {
+          if (epoch === this.answerSwitchEpoch) {
+            if (!committed) {
+              controller.cancelPreparedAnswer();
+              navigator.cancelPreparedMove();
+            }
+            this.finishAnswerViewportWait(false);
+            this.applyOverscrollOffset(0);
+            this.answerSwitchTransition = undefined;
+            this.navigatorBusy = false;
+            this.prefetchNeighborAnswer(false);
+            this.prefetchNeighborAnswer(true);
+          }
+        }
+      }
     }
-    // 取得目标后再复位，紧接着 load 卸载旧正文；分页等待/切换失败不破坏当前边界。
-    // 新内容从顶部渲染：边界状态归位，避免沿用上一答的贴底状态误触发底部过滑。
-    this.contentAtBottom = false;
-    this.contentAtTop = true;
-    // 顶栏折叠态随新答复位：新内容从顶部渲染，问题标题回到视口内。
-    this.answerQuestionScrolled = false;
-    // 折叠的标题栏/底部操作栏随新答复位回显（对齐上游：切回答 = 新建 ScrollState，
-    // currentScroll == 0 时 offset.snapTo(0) 强制回显；本页组件复用 @State，需手动复位）。
-    this.chromeHiddenByScroll = false;
-    this.lastContentScrollOffset = 0;
-    AppStorage.setOrCreate('detailTitleHiddenByScroll', false);
-    this.voteController?.deactivate();
-    this.voteController = undefined;
-    this.favoriteDialogShown = false;
-    this.contentFavorited = false;
-    this.activeContentId = id;
-    this.publishPreviewAnswerTitle(id, preview);
-    // preferAnswerCache=true：滑动手势/停留时已预取正文，命中缓存即直接渲染，
-    // 不再整页转圈；未命中时仓库内部复用同一在飞请求，不会重复下载。
-    await this.controller?.load(ContentDetailKind.ANSWER, id, true);
-    return true;
   }
 
-  /** 过滑提交：先把当前页沿拖动方向整页滑出（相邻页顺势铺满），再切换回答，
-   * 正文就绪后在同一位置落地，不再松手瞬间"瞬移换页"。
-   * 命中正文缓存时整段过渡约 200ms；未命中时冻结页停留到正文加载完成。 */
   private async commitAnswerSwitch(previous: boolean): Promise<void> {
-    if (this.navigatorBusy) { return; }
-    const extent = this.answerSwitchExtentVp();
-    const sign = previous ? 1 : -1;
-    this.navigatorBusy = true;
-    this.answerSwitchTransition = { previous: previous, preview: this.answerPreviewData(previous) };
-    this.overscrollRawDrag = 0;
-    this.prefetchNeighborAnswer(previous);
-    let moved = false;
+    await this.applyAnswerMove(previous ? -1 : 1);
+  }
+
+  private showAnswerSwitchFailure(message: string): void {
     try {
-      await this.animateOverscrollTo(sign * extent);
-      if (this.pageActive) {
-        moved = await this.applyAnswerMove(previous ? -1 : 1);
-      }
-      if (!moved) {
-        // 切换失败/页面失活：让当前页滑回原位，冻结页随之退出。
-        await this.animateOverscrollTo(0);
-      }
-    } finally {
-      this.applyOverscrollOffset(0);
-      this.answerSwitchTransition = undefined;
-      this.navigatorBusy = false;
+      this.getUIContext().getPromptAction().showToast({ message: message.length > 0 ? message : '暂时无法切换回答，请重试' });
+    } catch (_error) {
+      // 提示失败不影响旧正文与事务收尾。
     }
+  }
+
+  private finishAnswerViewportWait(ready: boolean): void {
+    if (this.answerViewportTimer >= 0) { clearTimeout(this.answerViewportTimer); }
+    this.answerViewportTimer = -1;
+    const waiter = this.answerViewportWaiter;
+    this.answerViewportWaiter = undefined;
+    waiter?.(ready);
+  }
+
+  private waitForAnswerViewport(): Promise<boolean> {
+    if (this.answerViewportWidthVp > 0 && this.answerViewportHeightVp > 0) { return Promise.resolve(true); }
+    return new Promise<boolean>((resolve: (ready: boolean) => void): void => {
+      this.answerViewportWaiter = resolve;
+      this.answerViewportTimer = setTimeout((): void => this.finishAnswerViewportWait(false), 8000);
+    });
+  }
+
+  private invalidateAnswerSwitch(): void {
+    this.answerSwitchEpoch += 1;
+    this.finishAnswerViewportWait(false);
+    this.answerNavigator?.cancelPreparedMove();
+    if (this.phase === ContentDetailPhase.READY) { this.controller?.cancelPreparedAnswer(); }
+    this.answerPrefetcher?.reset();
+    this.answerSwitchTransition = undefined;
+    this.navigatorBusy = false;
+    this.resetAnswerOverscroll(false);
   }
 
   /** 整页切换的视口跨度：横向取宽度、纵向取高度；未测得时兜底，避免过渡退化为原地换页。 */
@@ -2844,46 +2929,24 @@ struct ContentDetailPage {
     });
   }
 
-  /** 切换瞬间先用相邻回答预览回填标题栏，避免新正文出来前仍挂着上一条回答的标题。 */
-  private publishPreviewAnswerTitle(id: string, preview: AnswerNavigationPreview | undefined): void {
-    const current = this.content;
-    if (preview === undefined || preview.answerId !== id || current === undefined ||
-      current.kind !== ContentDetailKind.ANSWER) {
-      return;
-    }
-    publishAnswerTitle({
-      id: id,
-      questionId: current.value.questionId,
-      questionTitle: contentContextTitle(current),
-      authorName: preview.authorName,
-      authorAvatarUrl: preview.authorAvatarUrl,
-      authorBadgeIconUrl: '',
-      scrolled: false
-    });
+  private ensureAnswerPrefetcher(): void {
+    if (this.kind !== ContentDetailKind.ANSWER || this.answerPrefetcher !== undefined || !this.pageActive) { return; }
+    const repository = this.answerPrefetchRepositoryFactory();
+    if (repository !== undefined) { this.answerPrefetcher = new AnswerDetailPrefetcher(repository); }
   }
 
-  /**
-   * 预取相邻回答正文（只填充仓库缓存，失败静默）。
-   * 预取与切换都走 preferCache=true：命中缓存直接返回，未命中才请求，
-   * 重复触发由仓库的在飞请求表复用，不会叠加下载。
-   */
+  /** 只预取已知的相邻 ID，不触发分页、不写历史，与前台仓库独立。 */
   private prefetchNeighborAnswer(previous: boolean): void {
-    if (this.kind !== ContentDetailKind.ANSWER) { return; }
-    const repository = this.repository;
-    if (repository === undefined) { return; }
-    const preview = previous
-      ? this.answerNavigator?.previousAnswerPreview()
-      : this.answerNavigator?.nextAnswerPreview();
-    const id = preview?.answerId ?? '';
-    if (id.length === 0) { return; }
-    repository.getAnswer(id, true).catch((_error: Error): void => {
-      // 预取失败不打扰用户：切过去时仍会走常规加载并给出错误态。
-    });
+    if (!this.pageActive || this.kind !== ContentDetailKind.ANSWER || this.phase !== ContentDetailPhase.READY ||
+      this.interactionPending || this.navigatorBusy) { return; }
+    this.ensureAnswerPrefetcher();
+    const id = this.answerNavigator?.peekId(previous ? -1 : 1);
+    if (id !== undefined && id !== this.activeContentId) { void this.answerPrefetcher?.request(id, false); }
   }
 
   /** 按 tanh 阻尼转为过滑偏移：横向模式不依赖正文纵向边界，纵向模式仍要求贴顶/贴底。 */
   private onAnswerOverscrollPanUpdate(event: GestureEvent): void {
-    if (this.kind !== ContentDetailKind.ANSWER || this.answerFabDragging || this.answerSwitchMode === 'off') { return; }
+    if (this.kind !== ContentDetailKind.ANSWER || this.navigatorBusy || this.answerFabDragging || this.answerSwitchMode === 'off') { return; }
     if (this.bodyTextSelectionActive) {
       // 拖选让位：过滑 pan 与正文拖选并行识别（选词 Text 吞手势只影响互斥仲裁路径），
       // 页顶拖选的位移会在这里被误判为"贴顶继续过滑"直接切走回答。选区通常在长按
@@ -2928,7 +2991,7 @@ struct ContentDetailPage {
       (previous ? this.navigatorHasPrevious() : this.navigatorHasNext());
     this.overscrollRawDrag = 0;
     if (triggered) {
-      // 不瞬移归零：先把剩余行程滑完再换页（见 commitAnswerSwitch）。
+      // 保留拖动量，目标接纳并取得视口后再落位提交。
       void this.commitAnswerSwitch(previous);
       return;
     }
@@ -2941,7 +3004,8 @@ struct ContentDetailPage {
    * 提交过渡中的偏移由过渡流程自己收尾，不能在这里打断。 */
   private cancelAnswerOverscrollPan(): void {
     this.overscrollRawDrag = 0;
-    if (this.answerSwitchTransition !== undefined || this.answerOverscrollOffset === 0) { return; }
+    if (this.navigatorBusy) { this.invalidateAnswerSwitch(); return; }
+    if (this.answerOverscrollOffset === 0) { return; }
     this.getUIContext().animateTo({ curve: curves.springMotion(0.32, 0.78) }, (): void => {
       this.applyOverscrollOffset(0);
     });
@@ -3534,6 +3598,15 @@ struct ContentDetailPage {
   }
 
   private applyState(state: ContentDetailViewState): void {
+    if (state.content?.kind === ContentDetailKind.ANSWER && this.answerQuestionId !== state.content.value.questionId) {
+      this.answerPrefetcher?.reset();
+      if (this.answerQuestionId.length > 0) {
+        this.invalidateAnswerSwitch();
+        this.answerNavigator?.dispose();
+        this.answerNavigator = undefined;
+      }
+      this.answerQuestionId = state.content.value.questionId;
+    }
     this.phase = state.phase;
     this.content = state.content;
     this.segmentInfos = this.extractSegmentInfos(state.content);
@@ -3627,6 +3700,8 @@ struct ContentDetailPage {
   }
 
   private applyVoteState(state: ContentVoteViewState): void {
+    // 互动开始和结束均作废快照，防止切回本答时旧赞同/感谢状态回流。
+    if (state.pending !== this.interactionPending) { this.invalidateAnswerSwitch(); }
     this.voteState = state.voteState;
     this.voteupCount = state.voteupCount;
     this.thanked = state.thanked;
@@ -3634,6 +3709,7 @@ struct ContentDetailPage {
     this.interactionPending = state.pending;
     this.interactionErrorMessage = state.errorMessage ?? '';
     this.interactionRequiresLogin = state.requiresLogin;
+    if (!state.pending) { this.prefetchNeighborAnswer(false); }
   }
 
   private applyFollowState(state: FollowViewState): void {
@@ -3701,6 +3777,7 @@ export struct QuestionDetailPage {
 
 @Component
 export struct AnswerDetailPage {
+  answerPrefetchRepositoryFactory: () => ContentRepository | undefined = () => undefined;
   questionAnswerFeedFactory: () => QuestionAnswerFeedRepository | undefined = () => undefined;
   contentId: string = '';
   repository: ContentRepository | undefined = undefined;
@@ -3729,6 +3806,7 @@ export struct AnswerDetailPage {
       questionAnswerFeedFactory: this.questionAnswerFeedFactory,
       contentId: this.contentId,
       repository: this.repository,
+      answerPrefetchRepositoryFactory: this.answerPrefetchRepositoryFactory,
       linkCardMetaRepository: this.linkCardMetaRepository,
       openedContentStore: this.openedContentStore,
       historyUploader: this.historyUploader,

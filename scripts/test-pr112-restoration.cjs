@@ -52,7 +52,7 @@ function methodHarness(file, name, globals = {}) {
   return vm.runInNewContext(compile('class Harness {\n' + source.slice(begin, end + 4) + '\n}') + '\nHarness', globals);
 }
 const pages = 'entry/src/main/ets/pages/';
-const { ContentDetailController } = load(pages + 'ContentDetailState.ets');
+const { ContentDetailController, ContentDetailPhase } = load(pages + 'ContentDetailState.ets');
 const { ContentDetailKind } = load('data/src/main/ets/repository/ContentRepository.ets');
 const answer = id => ({id, questionId: '123', contentHtml: '<p>body</p>', excerpt: '', url: '',
   voteupCount: 0, commentCount: 0, createdAt: 1, updatedAt: 1});
@@ -67,26 +67,59 @@ function controllerFixture() {
   controller.activate();
   return {controller, repository};
 }
-contract('target-failure-keeps-current-body-and-identity', true, async () => {
-  const {controller, repository} = controllerFixture();
-  await controller.load(ContentDetailKind.ANSWER, '1');
-  repository.fail = true;
-  const Harness = methodHarness(pages + 'ContentDetailPages.ets', 'applyAnswerMove', {
-    AppStorage: {setOrCreate() {}}, ContentDetailKind
-  });
+// These are page methods executed with real navigation/controller/prefetch state and controlled UI IO.
+function pageFixture(repository = {getAnswer: async id => answer(id), cancel() {}}, prefetchRepository) {
+  const {QuestionAnswerNavigator} = load(pages + 'QuestionAnswerNavigator.ets');
+  const {AnswerDetailPrefetcher} = load(pages + 'AnswerSwitchPrefetch.ets');
+  const names = ['applyAnswerMove', 'moveAnswer', 'commitAnswerSwitch', 'invalidateAnswerSwitch',
+    'waitForAnswerViewport', 'finishAnswerViewportWait', 'showAnswerSwitchFailure', 'applyVoteState', 'onLoginChanged'];
+  const Harness = methodHarness(pages + 'ContentDetailPages.ets', names[0],
+    {AppStorage: {setOrCreate() {}}, ContentDetailKind, ContentDetailPhase});
+  for (const name of names.slice(1)) {
+    Harness.prototype[name] = methodHarness(pages + 'ContentDetailPages.ets', name,
+      {AppStorage: {setOrCreate() {}}, ContentDetailKind, ContentDetailPhase, SessionStatus: {AUTHENTICATED: 'authenticated'}, setTimeout, clearTimeout}).prototype[name];
+  }
   const page = new Harness();
-  Object.assign(page, {answerNavigator: {previousAnswerPreview() {}, nextAnswerPreview() {},
-    move: async () => '2'}, navigatorRevision: 0, pageActive: true, activeContentId: '1', controller,
-    publishPreviewAnswerTitle() {}, getUIContext: () => ({getPromptAction: () => ({showToast() {}})})});
-  const moved = await page.applyAnswerMove(1);
+  const opened = [];
+  const controller = new ContentDetailController(repository, {upsert: async record => {opened.push(record.contentKey);}});
+  const seed = {phase: 'ready', items: ['1', '2', '3'].map(id => ({feedItem: {target: answer(id)}})),
+    loadingMore: false, canLoadMore: false, sortOrder: 'default', errorMessage: '', requiresLogin: false};
+  const navigator = new QuestionAnswerNavigator('123', '1', seed, {cancel() {}, loadPage() {throw Error('unexpected paging');}});
+  let voteDeactivated = false;
+  const messages = [];
+  Object.assign(page, {kind: ContentDetailKind.ANSWER, answerNavigator: navigator, navigatorRevision: 0,
+    pageActive: true, activeContentId: '1', phase: 'ready', controller, answerQuestionId: '123',
+    navigatorBusy: false, interactionPending: false, answerSwitchEpoch: 0, favoriteStateEpoch: 0,
+    session: {getState: () => ({status: 'authenticated'})}, answerDataSource: {replace() {}}, ensureAnswers() {}, answerViewportWidthVp: 360,
+    answerViewportHeightVp: 800, answerViewportTimer: -1, ensureAnswerPrefetcher() {},
+    answerPrefetcher: prefetchRepository ? new AnswerDetailPrefetcher(prefetchRepository) : undefined,
+    voteController: {deactivate() {voteDeactivated = true;}},
+    animateOverscrollTo: async () => {}, answerSwitchExtentVp: () => 360, answerPreviewData() {},
+    applyOverscrollOffset() {}, resetAnswerOverscroll() {}, prefetchNeighborAnswer() {},
+    getUIContext: () => ({getPromptAction: () => ({showToast(item) {messages.push(item.message);}})})});
+  controller.activate();
+  return {page, controller, navigator, opened, messages, voteDeactivated: () => voteDeactivated,
+    dispose() {page.invalidateAnswerSwitch(); page.answerPrefetcher?.dispose(); navigator.dispose(); controller.deactivate();}};
+}
+contract('target-failure-keeps-current-body-and-identity', false, async () => {
+  const repository = {fail: false, getAnswer: async id => {
+    if (repository.fail) throw Error('network'); return answer(id);
+  }, cancel() {}};
+  const fixture = pageFixture(repository);
   try {
-    assert.equal(moved, false, 'failed target must report failure');
-    assert.equal(page.activeContentId, '1');
-    assert.equal(controller.snapshot().phase, 'ready');
-    assert.equal(controller.snapshot().content.value.id, '1');
-  } finally { controller.deactivate(); }
+    await fixture.controller.load(ContentDetailKind.ANSWER, '1');
+    repository.fail = true;
+    assert.equal(await fixture.page.applyAnswerMove(1), false);
+    assert.equal(fixture.page.activeContentId, '1');
+    assert.equal(fixture.navigator.currentId(), '1');
+    assert.equal(fixture.controller.snapshot().content.value.id, '1');
+    assert.equal(fixture.controller.snapshot().phase, 'ready');
+    assert.equal(fixture.voteDeactivated(), false);
+    assert.deepEqual(fixture.opened, ['answer:1']);
+    assert.equal(fixture.page.navigatorBusy, false);
+  } finally {fixture.dispose();}
 });
-contract('prepare-failure-keeps-current-document', true, async () => {
+contract('prepare-failure-keeps-current-document', false, async () => {
   const {controller, repository} = controllerFixture();
   try {
     await controller.load(ContentDetailKind.ANSWER, '1');
@@ -98,7 +131,7 @@ contract('prepare-failure-keeps-current-document', true, async () => {
     assert.equal(controller.snapshot().phase, 'ready');
   } finally { controller.deactivate(); }
 });
-contract('candidate-commits-once-and-rejects-stale-candidate', true, async () => {
+contract('candidate-commits-once-and-rejects-stale-candidate', false, async () => {
   const {controller} = controllerFixture();
   try {
     await controller.load(ContentDetailKind.ANSWER, '1');
@@ -130,7 +163,7 @@ contract('non-entry-answer-restores-its-own-position', true, () => {
   assert.equal(document.pendingPosition, saved);
   assert.equal(document.positionWritable, false, 'do not overwrite saved progress before restoration');
 });
-contract('independent-prefetch-does-not-block-foreground', true, async () => {
+contract('independent-prefetch-does-not-block-foreground', false, async () => {
   const {ZhihuHttpClient} = load('data/src/main/ets/network/ZhihuHttpClient.ets');
   const {DefaultContentRepository} = load('data/src/main/ets/repository/DefaultContentRepository.ets');
   // Use Index's actual repository wiring: shared on PR, isolated after factory restoration.
@@ -157,7 +190,7 @@ contract('independent-prefetch-does-not-block-foreground', true, async () => {
   const wiring = new Wiring();
   const foreground = wiring.answerRepository;
   const background = wiring.answerPrefetchRepositoryFactory?.() ?? foreground;
-  const pending = background.getAnswer('2', true);
+  const pending = background.getAnswer('2');
   // Handle rejection immediately so a failed assertion never leaves an unhandled promise.
   const result = foreground.getAnswer('1').then(value => ({value}), error => ({error}));
   await Promise.resolve();
@@ -167,7 +200,7 @@ contract('independent-prefetch-does-not-block-foreground', true, async () => {
   assert.equal(response.error, undefined, 'foreground must not fail BUSY while neighbor is fetching');
   assert.equal(response.value.id, '1');
 });
-contract('navigation-prepare-and-peek-do-not-advance-or-fetch', true, async () => {
+contract('navigation-prepare-and-peek-do-not-advance-or-fetch', false, async () => {
   const {QuestionAnswerNavigator} = load(pages + 'QuestionAnswerNavigator.ets');
   let calls = 0;
   const seed = {phase: 'ready', items: ['1', '2'].map(id => ({feedItem: {target: answer(id)}})),
@@ -182,7 +215,7 @@ contract('navigation-prepare-and-peek-do-not-advance-or-fetch', true, async () =
     assert.equal(calls, 0);
   } finally { navigator.dispose(); }
 });
-contract('prefetch-queue-deduplicates-prioritizes-and-drops-late-results', true, async () => {
+contract('prefetch-queue-deduplicates-prioritizes-and-drops-late-results', false, async () => {
   const file = pages + 'AnswerSwitchPrefetch.ets';
   assert(fs.existsSync(path.join(root, file)), 'restore independent prefetcher');
   const {AnswerDetailPrefetcher, ANSWER_PREFETCH_CAPACITY} = load(file);
@@ -251,9 +284,160 @@ contract('name-resources-and-share-fallback-match-main', false, () => {
     assert(!read(pages + name + '.ets').includes('知乎Plus'), name);
   }
 });
+contract('same-id-favorite-query-drops-old-account-result', false, async () => {
+  const pending = [];
+  const Harness = methodHarness(pages + 'ContentDetailPages.ets', 'refreshContentFavoriteState',
+    {SessionStatus: {AUTHENTICATED: 'authenticated'}, ContentDetailKind});
+  const page = new Harness();
+  Object.assign(page, {pageActive: true, kind: ContentDetailKind.ANSWER, activeContentId: '1',
+    favoriteStateEpoch: 0, contentFavorited: false,
+    session: {getState: () => ({status: 'authenticated'})},
+    collectionRepository: {getContentCollections: () => new Promise(resolve => pending.push(resolve))}});
+  page.refreshContentFavoriteState();
+  page.favoriteStateEpoch++; // account invalidation
+  page.refreshContentFavoriteState();
+  pending[1]([{isFavorited: false}]); await Promise.resolve();
+  pending[0]([{isFavorited: true}]); await Promise.resolve();
+  assert.equal(page.contentFavorited, false);
+});
+const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+for (const entry of ['moveAnswer', 'commitAnswerSwitch-horizontal', 'commitAnswerSwitch-vertical']) {
+  contract('entry-' + entry + '-commits-only-after-preparation-and-animation', false, async () => {
+    let finish;
+    const background = {getAnswer: id => new Promise(resolve => {finish = () => resolve(answer(id));}), cancel() {}};
+    const fixture = pageFixture(undefined, background);
+    let land;
+    try {
+      await fixture.controller.load(ContentDetailKind.ANSWER, '1');
+      fixture.page.answerSwitchMode = entry.endsWith('vertical') ? 'vertical' : 'horizontal';
+      fixture.page.animateOverscrollTo = () => new Promise(resolve => {land = resolve;});
+      const moving = entry === 'moveAnswer' ? fixture.page.moveAnswer(1) : fixture.page.commitAnswerSwitch(false);
+      await tick();
+      assert.equal(fixture.page.activeContentId, '1');
+      assert.equal(fixture.navigator.currentId(), '1');
+      assert.deepEqual(fixture.opened, ['answer:1']);
+      finish(); await tick();
+      assert.equal(fixture.controller.snapshot().content.value.id, '1');
+      assert.equal(fixture.voteDeactivated(), false);
+      land(); await moving;
+      assert.equal(fixture.page.activeContentId, '2');
+      assert.equal(fixture.navigator.currentId(), '2');
+      assert.equal(fixture.controller.snapshot().content.value.id, '2');
+      assert.equal(fixture.voteDeactivated(), true);
+      assert.deepEqual(fixture.opened, ['answer:1', 'answer:2']);
+    } finally {fixture.dispose();}
+  });
+}
+contract('account-or-page-invalidation-rejects-late-answer', false, async () => {
+  let finish;
+  const background = {getAnswer: id => new Promise(resolve => {finish = () => resolve(answer(id));}), cancel() {}};
+  const fixture = pageFixture(undefined, background);
+  try {
+    await fixture.controller.load(ContentDetailKind.ANSWER, '1');
+    const moving = fixture.page.applyAnswerMove(1); await tick();
+    fixture.page.onLoginChanged();
+    finish();
+    assert.equal(await moving, false);
+    assert.equal(fixture.page.activeContentId, '1');
+    assert.equal(fixture.navigator.currentId(), '1');
+    assert.equal(fixture.controller.snapshot().content.value.id, '1');
+    assert.deepEqual(fixture.opened, ['answer:1', 'answer:1']); // account reload of current answer is allowed
+    assert.equal(fixture.page.answerPrefetcher.peek('2'), undefined);
+  } finally {fixture.dispose();}
+});
+contract('cancel-during-animation-cannot-commit-or-clear-new-transaction', false, async () => {
+  const fixture = pageFixture();
+  let land;
+  try {
+    await fixture.controller.load(ContentDetailKind.ANSWER, '1');
+    fixture.page.animateOverscrollTo = () => new Promise(resolve => {land = resolve;});
+    const old = fixture.page.applyAnswerMove(1); await tick();
+    fixture.page.invalidateAnswerSwitch();
+    fixture.page.navigatorBusy = true; // represents a newer transaction owning the lock
+    land(); assert.equal(await old, false);
+    assert.equal(fixture.page.navigatorBusy, true);
+    assert.equal(fixture.navigator.currentId(), '1');
+    assert.deepEqual(fixture.opened, ['answer:1']);
+  } finally {fixture.dispose();}
+});
+contract('vote-or-thanks-invalidates-prepared-and-cached-snapshots', false, async () => {
+  const fixture = pageFixture(undefined, {getAnswer: async id => answer(id), cancel() {}});
+  let land;
+  try {
+    await fixture.controller.load(ContentDetailKind.ANSWER, '1');
+    await fixture.page.answerPrefetcher.request('2', false);
+    fixture.page.animateOverscrollTo = () => new Promise(resolve => {land = resolve;});
+    const old = fixture.page.applyAnswerMove(1); await tick();
+    fixture.page.applyVoteState({pending: true});
+    land(); assert.equal(await old, false);
+    assert.equal(fixture.page.answerPrefetcher.cacheSize(), 0);
+    fixture.page.applyVoteState({pending: false});
+    assert.equal(fixture.page.answerPrefetcher.cacheSize(), 0);
+    assert.equal(fixture.navigator.currentId(), '1');
+    assert.deepEqual(fixture.opened, ['answer:1']);
+  } finally {fixture.dispose();}
+});
+contract('current-history-completion-survives-candidate-cancellation', false, async () => {
+  let finish;
+  const controller = new ContentDetailController({getAnswer: async id => answer(id), cancel() {}},
+    {upsert: () => new Promise(resolve => {finish = resolve;})});
+  controller.activate();
+  try {
+    const loading = controller.load(ContentDetailKind.ANSWER, '1'); await tick();
+    const candidate = controller.admitAnswer(answer('2'));
+    controller.cancelPreparedAnswer();
+    finish(); await loading;
+    assert.equal(controller.snapshot().openedRecordPhase, 'recorded');
+    assert.equal(controller.commitPreparedAnswer(candidate), false);
+  } finally {controller.deactivate();}
+});
+contract('viewport-lost-during-animation-keeps-current-identity', false, async () => {
+  const fixture = pageFixture();
+  let land;
+  try {
+    await fixture.controller.load(ContentDetailKind.ANSWER, '1');
+    fixture.page.animateOverscrollTo = target => target === 0 ? Promise.resolve() : new Promise(resolve => {land = resolve;});
+    const moving = fixture.page.applyAnswerMove(1); await tick();
+    fixture.page.answerViewportWidthVp = 0;
+    land(); assert.equal(await moving, false);
+    assert.equal(fixture.navigator.currentId(), '1');
+    assert.equal(fixture.page.activeContentId, '1');
+    assert.deepEqual(fixture.opened, ['answer:1']);
+  } finally {fixture.dispose();}
+});
+contract('animation-and-toast-errors-release-transaction-without-changing-identity', false, async () => {
+  const fixture = pageFixture();
+  try {
+    await fixture.controller.load(ContentDetailKind.ANSWER, '1');
+    fixture.page.animateOverscrollTo = async () => {throw Error('window lost');};
+    fixture.page.getUIContext = () => {throw Error('window lost');};
+    assert.equal(await fixture.page.applyAnswerMove(1), false);
+    assert.equal(fixture.page.navigatorBusy, false);
+    assert.equal(fixture.navigator.currentId(), '1');
+    assert.equal(fixture.page.activeContentId, '1');
+    assert.deepEqual(fixture.opened, ['answer:1']);
+  } finally {fixture.dispose();}
+});
+contract('unavailable-viewport-and-cancellation-do-not-commit', false, async () => {
+  const fixture = pageFixture();
+  try {
+    await fixture.controller.load(ContentDetailKind.ANSWER, '1');
+    fixture.page.answerViewportWidthVp = 0;
+    const moving = fixture.page.applyAnswerMove(1); await tick();
+    assert.equal(fixture.navigator.currentId(), '1');
+    fixture.page.finishAnswerViewportWait(false);
+    assert.equal(await moving, false);
+    assert.equal(fixture.messages[0], '回答视口准备超时，请重试');
+    assert.deepEqual(fixture.opened, ['answer:1']);
+  } finally {fixture.dispose();}
+});
 (async () => {
   let failed = 0;
+  let selected = 0;
+  const step3 = new Set(['non-entry-answer-restores-its-own-position', 'cancelled-candidate-does-not-write-progress']);
   for (const item of tests) {
+    if (args.includes('--step2') && step3.has(item.name)) continue;
+    selected++;
     try {
       await item.run();
       console.log('PASS ' + item.name);
@@ -265,6 +449,7 @@ contract('name-resources-and-share-fallback-match-main', false, () => {
       if (!known) failed++;
     }
   }
-  console.log(baseline ? 'Baseline capture only; KNOWN-FAIL cases are unresolved acceptance gates.' : 'Acceptance run (all contracts must pass).');
+  console.log('Selected ' + selected + ' contracts; failures: ' + failed + (args.includes('--step2') ? ' (step 3 document/position gates excluded)' : ''));
+  console.log(baseline ? 'Baseline capture only; KNOWN-FAIL cases are unresolved acceptance gates.' : 'Acceptance run (all selected contracts must pass).');
   process.exitCode = failed ? 1 : 0;
 })().catch(error => { console.error(error); process.exitCode = 1; });

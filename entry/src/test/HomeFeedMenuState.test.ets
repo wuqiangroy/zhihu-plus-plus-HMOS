@@ -16,7 +16,7 @@ class MenuContentRepository implements ContentRepository {
       followerCount: 0, createdAt: 0, updatedAt: 0, author: this.questionAuthor, topics: [{ id: '11', name: '一个很长的话题名称，用于检查完整屏蔽项' }] };
   }
 
-  async getAnswer(id: string, _preferCache?: boolean): Promise<Answer> {
+  async getAnswer(id: string): Promise<Answer> {
     this.calls.push(`answer:${id}`);
     return { id: id, questionId: '42', contentHtml: '', excerpt: '', url: '', voteupCount: 0,
       commentCount: 0, createdAt: 0, updatedAt: 0, author: user('answer-author') };

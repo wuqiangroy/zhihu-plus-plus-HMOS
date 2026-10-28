@@ -88,6 +88,8 @@ export class ContentDetailController {
   private errorMessage?: string;
   private requiresLogin: boolean = false;
   private openedRecordPhase: OpenedRecordPhase = OpenedRecordPhase.NOT_CONFIGURED;
+  /** 已准备但尚未提交的候选回答 id：防止过期候选借新代次提交。 */
+  private preparedAnswerId: string = '';
 
   constructor(repository: ContentRepository, openedContentStore?: OpenedContentStore,
     observer: ContentDetailStateObserver = (_state: ContentDetailViewState): void => {
@@ -126,11 +128,7 @@ export class ContentDetailController {
     };
   }
 
-  /**
-   * 加载内容详情。preferAnswerCache 仅对回答生效：为 true 时优先复用预取结果
-   * （回答切换导航），下拉刷新等场景保持缺省 false 以强制拉取最新数据。
-   */
-  async load(kind: ContentDetailKind, id: string, preferAnswerCache: boolean = false): Promise<void> {
+  async load(kind: ContentDetailKind, id: string): Promise<void> {
     if (!this.active) {
       return;
     }
@@ -139,6 +137,7 @@ export class ContentDetailController {
     }
     const generation = ++this.generation;
     this.kind = kind;
+    this.preparedAnswerId = '';
     this.content = undefined;
     this.errorMessage = undefined;
     this.requiresLogin = false;
@@ -148,7 +147,7 @@ export class ContentDetailController {
     this.phase = ContentDetailPhase.LOADING;
     this.emit();
     try {
-      const loaded = await this.fetch(kind, id, generation, preferAnswerCache);
+      const loaded = await this.fetch(kind, id, generation);
       if (!this.isCurrent(generation)) {
         return;
       }
@@ -174,17 +173,75 @@ export class ContentDetailController {
     }
   }
 
-  private async fetch(kind: ContentDetailKind, id: string, generation: number,
-    preferAnswerCache: boolean = false): Promise<LoadedContentDetail> {
+  /** 准备回答时保留已显示内容；调用方确认导航后再提交。 */
+  async prepareAnswer(id: string): Promise<LoadedContentDetail | undefined> {
+    if (!this.active || this.phase !== ContentDetailPhase.READY) { return undefined; }
+    const generation = ++this.generation;
+    this.errorMessage = undefined;
+    this.preparedAnswerId = id;
+    try {
+      const loaded = await this.fetch(ContentDetailKind.ANSWER, id, generation);
+      return this.isCurrent(generation) ? loaded : undefined;
+    } catch (error) {
+      if (this.isCurrent(generation)) {
+        this.errorMessage = contentDetailErrorMessage(error);
+      }
+      return undefined;
+    }
+  }
+
+  /**
+   * 登记预取/手势期间已取得的候选详情：分配本次加载代次并标记为准备态。
+   * 不替换当前显示内容、不写阅读记录；返回的对象必须同时用于挂载候选正文实例与提交，
+   * 否则正文实例键会变化导致重建。
+   */
+  admitAnswer(answer: Answer): LoadedContentDetail | undefined {
+    if (!this.active || this.phase !== ContentDetailPhase.READY || answer.id.length === 0) {
+      return undefined;
+    }
+    this.errorMessage = undefined;
+    this.preparedAnswerId = answer.id;
+    return { kind: ContentDetailKind.ANSWER, loadGeneration: ++this.generation, value: answer };
+  }
+
+  /** 取消候选不会清空当前正文，也不产生阅读记录。 */
+  cancelPreparedAnswer(): void {
+    this.preparedAnswerId = '';
+    this.generation += 1;
+    this.repository.cancel();
+  }
+
+  canCommitPreparedAnswer(content: LoadedContentDetail): boolean {
+    return content.kind === ContentDetailKind.ANSWER && content.loadGeneration !== undefined &&
+      this.preparedAnswerId === content.value.id && this.isCurrent(content.loadGeneration) &&
+      this.content?.loadGeneration !== content.loadGeneration;
+  }
+
+  preparedAnswerError(): string { return this.errorMessage ?? ''; }
+
+  commitPreparedAnswer(content: LoadedContentDetail): boolean {
+    if (!this.canCommitPreparedAnswer(content) || content.loadGeneration === undefined) {
+      return false;
+    }
+    this.preparedAnswerId = '';
+    this.kind = ContentDetailKind.ANSWER;
+    this.content = content;
+    this.errorMessage = undefined;
+    this.requiresLogin = false;
+    this.phase = ContentDetailPhase.READY;
+    this.openedRecordPhase = this.openedContentStore === undefined
+      ? OpenedRecordPhase.NOT_CONFIGURED : OpenedRecordPhase.PENDING;
+    this.emit();
+    void this.recordOpenIfConfigured(content, content.loadGeneration);
+    return true;
+  }
+
+  private async fetch(kind: ContentDetailKind, id: string, generation: number): Promise<LoadedContentDetail> {
     switch (kind) {
       case ContentDetailKind.QUESTION:
         return { kind: kind, loadGeneration: generation, value: await this.repository.getQuestion(id) };
       case ContentDetailKind.ANSWER:
-        return {
-          kind: kind,
-          loadGeneration: generation,
-          value: await this.repository.getAnswer(id, preferAnswerCache)
-        };
+        return { kind: kind, loadGeneration: generation, value: await this.repository.getAnswer(id) };
       case ContentDetailKind.ARTICLE:
         return { kind: kind, loadGeneration: generation, value: await this.repository.getArticle(id) };
     }
@@ -201,7 +258,8 @@ export class ContentDetailController {
       return;
     }
     const recorded = await recordContentOpen(store, this.historyUploader, content);
-    if (this.isCurrent(generation)) {
+    // 候选准备会推进请求代次，但当前正文的历史写入仍属于这个实例。
+    if (this.active && this.content?.loadGeneration === generation) {
       this.openedRecordPhase = recorded ? OpenedRecordPhase.RECORDED : OpenedRecordPhase.FAILED;
       this.emit();
     }

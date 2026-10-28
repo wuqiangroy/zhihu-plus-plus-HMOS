@@ -20,6 +20,17 @@ class FakeQuestionAnswerRepository implements QuestionAnswerFeedRepository {
   cancel(): void {}
 }
 
+class ControlledQuestionAnswerRepository implements QuestionAnswerFeedRepository {
+  finish?: (page: QuestionAnswerFeedPage) => void;
+  loadPage(_questionId: string, _order: QuestionAnswerSortOrder, _cursor?: string,
+    _reset?: boolean): Promise<QuestionAnswerFeedPage> {
+    return new Promise<QuestionAnswerFeedPage>((resolve: (page: QuestionAnswerFeedPage) => void): void => {
+      this.finish = resolve;
+    });
+  }
+  cancel(): void {}
+}
+
 function content(id: string): ChannelContentItem {
   return {
     kind: ChannelFeedItemKind.CONTENT,
@@ -85,6 +96,80 @@ export default function questionAnswerFeedTest(): void {
       expect(states[0].canLoadMore).assertFalse();
       expect(states[states.length - 1].phase).assertEqual(QuestionAnswersPhase.READY);
       expect(states[states.length - 1].items.length).assertEqual(1);
+    });
+
+    it('prepareAndPeekKeepIdentityAndDoNotPageUntilNeeded', 0, async () => {
+      const seed: QuestionAnswersViewState = {
+        phase: QuestionAnswersPhase.READY, items: [content('1'), content('2')], loadingMore: false,
+        canLoadMore: true, sortOrder: QuestionAnswerSortOrder.DEFAULT, errorMessage: '', requiresLogin: false,
+        nextCursor: 'next'
+      };
+      const repository = new FakeQuestionAnswerRepository([
+        { items: [content('3')], cursor: { isEnd: true, isStart: false, page: 2, total: 3 } }
+      ]);
+      const navigator = new QuestionAnswerNavigator('123', '1', seed, repository);
+      expect(navigator.peekId(-1)).assertUndefined();
+      expect(navigator.peekId(1)).assertEqual('2');
+      expect(await navigator.prepareMove(1)).assertEqual('2');
+      expect(repository.calls).assertEqual(0);
+      expect(navigator.currentId()).assertEqual('1');
+      expect(navigator.commitMove('3')).assertFalse();
+      expect(navigator.commitMove('2')).assertTrue();
+      expect(navigator.commitMove('2')).assertFalse();
+      expect(navigator.peekId(1)).assertUndefined();
+      expect(repository.calls).assertEqual(0);
+      expect(await navigator.prepareMove(1)).assertEqual('3');
+      expect(repository.calls).assertEqual(1);
+      expect(navigator.currentId()).assertEqual('2');
+      navigator.pause(); navigator.resume();
+      expect(navigator.commitMove('3')).assertFalse();
+      expect(navigator.currentId()).assertEqual('2');
+      navigator.dispose();
+    });
+
+    it('virtualEntryPreparationCanBeCancelledInEitherDirection', 0, async () => {
+      const seed: QuestionAnswersViewState = {
+        phase: QuestionAnswersPhase.READY, items: [content('7'), content('8')], loadingMore: false,
+        canLoadMore: false, sortOrder: QuestionAnswerSortOrder.UPDATED, errorMessage: '', requiresLogin: false
+      };
+      const repository = new FakeQuestionAnswerRepository([]);
+      const navigator = new QuestionAnswerNavigator('123', '99', seed, repository);
+      expect(await navigator.prepareMove(1)).assertEqual('7');
+      navigator.cancelPreparedMove();
+      expect(navigator.commitMove('7')).assertFalse();
+      expect(navigator.currentId()).assertEqual('99');
+      expect(await navigator.prepareMove(1)).assertEqual('7');
+      expect(navigator.commitMove('7')).assertTrue();
+      expect(navigator.peekId(-1)).assertEqual('99');
+      expect(await navigator.prepareMove(-1)).assertEqual('99');
+      expect(navigator.currentId()).assertEqual('7');
+      navigator.cancelPreparedMove();
+      expect(navigator.commitMove('99')).assertFalse();
+      expect(await navigator.prepareMove(-1)).assertEqual('99');
+      expect(navigator.commitMove('99')).assertTrue();
+      expect(navigator.hasPrevious()).assertFalse();
+      expect(navigator.peekId(1)).assertEqual('7');
+      expect(repository.calls).assertEqual(0);
+      navigator.dispose();
+    });
+
+    it('pauseDuringPaginationInvalidatesTargetEvenAfterResume', 0, async () => {
+      const repository = new ControlledQuestionAnswerRepository();
+      const seed: QuestionAnswersViewState = {
+        phase: QuestionAnswersPhase.READY, items: [content('1')], loadingMore: false,
+        canLoadMore: true, sortOrder: QuestionAnswerSortOrder.DEFAULT, errorMessage: '', requiresLogin: false,
+        nextCursor: 'next'
+      };
+      const navigator = new QuestionAnswerNavigator('123', '1', seed, repository);
+      const preparing = navigator.prepareMove(1);
+      navigator.pause(); navigator.resume();
+      const latePage: QuestionAnswerFeedPage = { items: [content('2')],
+        cursor: { isEnd: true, isStart: false, page: 2, total: 2 } };
+      repository.finish?.(latePage);
+      expect(await preparing === undefined).assertTrue();
+      expect(navigator.currentId()).assertEqual('1');
+      expect(navigator.commitMove('2')).assertFalse();
+      navigator.dispose();
     });
 
     it('navigatorLoadsNextPageAndKeepsPreviousItems', 0, async () => {
