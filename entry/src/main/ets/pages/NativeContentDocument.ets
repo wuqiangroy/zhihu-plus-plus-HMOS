@@ -1094,6 +1094,7 @@ export struct NativeContentDocument {
       // 不用整页覆盖层：加宽后即使 `HitTestMode.Transparent` 也会进入命中链，
       // 实测会干扰正文列表自身的滚动（详见 ReadingProgressBar 顶部注释）。
       ReadingProgressBar({
+        active: this.positionIsActive(),
         scroller: this.scroller,
         viewportHeightVp: this.viewportHeightVp,
         contentHeightVp: this.contentHeightVp,
@@ -1110,7 +1111,6 @@ export struct NativeContentDocument {
         }
       })
         .width(READING_PROGRESS_BAR_HIT_WIDTH_VP)
-        .height('100%')
         .margin({ right: READING_PROGRESS_BAR_RIGHT_INSET_VP })
 
       if (this.pageTurnGuideVisible && this.showPageTurnGuide) {

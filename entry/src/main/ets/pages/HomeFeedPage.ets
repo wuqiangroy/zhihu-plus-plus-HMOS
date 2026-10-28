@@ -1,3 +1,5 @@
+import { FeedThumbnail } from './components/FeedThumbnail';
+import { publishFeedScroll } from './FeedScrollOwnership';
 import {
   buildFeedFlowLayout,
   feedAnchorFlowIndex,
@@ -267,9 +269,7 @@ export struct HomeFeedPage {
             .id('home_feed_list')
             .width('100%')
             .onDidScroll((offset: number): void => {
-              if (offset !== 0) {
-                AppStorage.setOrCreate('bottomBarHiddenByScroll', offset > 0);
-              }
+              publishFeedScroll(HOME_FEED_SCROLL_KEY, offset);
             })
             // 记录手势起手时是否在顶部：从列表中间回滑到顶部后继续下拉的过冲
             // 也会被 Refresh 判成下拉刷新，需要据此区分。
@@ -619,13 +619,11 @@ export struct HomeFeedPage {
     // 图片/视频封面改为左侧大图，摘要与推荐语排在右侧（对齐需求示意）。
     Row({ space: $r('app.float.spacing_small') }) {
       if (this.hasFeedThumbnail(item)) {
-        Image(item.target.thumbnailUrl ?? '')
+        FeedThumbnail({ url: item.target.thumbnailUrl ?? '' })
           .width('42%')
           .aspectRatio(1)
           .constraintSize({ maxHeight: 150 })
           .borderRadius($r('app.float.spacing_small'))
-          .objectFit(ImageFit.Cover)
-          .alt('内容缩略图')
       }
       Column({ space: $r('app.float.spacing_xsmall') }) {
         if (item.target.excerpt.trim().length > 0) {

@@ -182,6 +182,8 @@ struct ContentDetailPage {
   private savedAnswerFabPosition?: FabPosition = undefined;
   private answerFabPreferences?: AppPreferencesStore = undefined;
   /** 底部操作栏实测高度（vp）：悬浮按钮下拖下限 = 默认底距 - 栏高 - 间隔。 */
+  private bottomActionLeftArea: Area | undefined = undefined;
+  private bottomActionRightArea: Area | undefined = undefined;
   @State private bottomActionBarHeightVp: number = 0;
   @StorageProp('systemFontSizeScale') @Watch('syncAnswerTitle') private systemFontSizeScale: number = 1;
   @StorageProp('readerActiveRouteKey') @Watch('onReaderOwnerChanged') private readerVisibleOwner: string = '';
@@ -437,6 +439,8 @@ struct ContentDetailPage {
     this.answerPrefetcher = undefined;
     this.favoriteStateEpoch += 1;
     this.pageActive = false;
+    this.bottomActionLeftArea = undefined;
+    this.bottomActionRightArea = undefined;
     if (this.content?.kind === ContentDetailKind.ANSWER &&
       AppStorage.get<string>('readerActiveAnswerDocument') === this.answerDocumentKey(this.content)) {
       AppStorage.setOrCreate('readerActiveAnswerDocument', '');
@@ -819,23 +823,7 @@ struct ContentDetailPage {
         .hitTestBehavior(HitTestMode.None)
       }
 
-      // 底部操作栏点击屏蔽层：操作栏悬浮在正文之上且必须放任正文滚动/点击穿透（Transparent），
-      // 但触点落在栏内时不能再传给下方正文——否则点「更多」的同时会命中栏下图片并打开大图。
-      // 仅在栏实际覆盖的矩形上屏蔽，正文其余区域不受影响。
-      if (!this.immersiveReading && (!this.autoHideArticleBottomBar || !this.chromeHiddenByScroll) &&
-        this.content !== undefined &&
-        this.phase === ContentDetailPhase.READY &&
-        this.bottomActionBarHeightVp > 0 && this.answerViewportHeightVp > 0) {
-        Stack()
-          .width('100%')
-          .height(this.bottomActionBarHeightVp)
-          .position({
-            x: 0,
-            y: Math.max(0, this.answerViewportHeightVp - this.bottomActionBarHeightVp)
-          })
-          .hitTestBehavior(HitTestMode.Block)
-      }
-
+      // 只有可见胶囊阻止点击穿透；胶囊间隙和系统手势区不再铺设透明阻挡层。
       // 底部操作栏：全屏悬浮层单实例承载（正文从下方穿透直至物理底边）。
       // 切勿在布局流内再渲染第二份——两份会完全重叠绘制（06a2ab90 修复的错乱根源）。
       // 仅保留这份真实操作栏；候选不绘制或接管投票/收藏/分享。
@@ -847,6 +835,7 @@ struct ContentDetailPage {
         }
         .width('100%')
         .height('100%')
+        .onTouchIntercept((event: TouchEvent): HitTestMode => this.bottomActionHitTest(event))
         .hitTestBehavior(this.kind === ContentDetailKind.ANSWER && this.answerOverscrollOffset !== 0
           ? HitTestMode.None : HitTestMode.Transparent)
         .enabled(this.kind !== ContentDetailKind.ANSWER || (!this.navigatorBusy && this.answerOverscrollOffset === 0))
@@ -2112,7 +2101,27 @@ struct ContentDetailPage {
     };
   }
 
-        @Builder
+  /** 根层保留 HDS 全屏定位；仅在可见胶囊内阻断下层兄弟，子按钮仍参与命中。 */
+  private bottomActionHitTest(event: TouchEvent): HitTestMode {
+    if (!this.pageActive || this.immersiveReading ||
+      (this.kind === ContentDetailKind.ANSWER && this.answerOverscrollOffset !== 0)) { return HitTestMode.None; }
+    if (event.touches.length === 0) { return HitTestMode.Transparent; }
+    const touch = event.touches[0];
+    return this.bottomActionAreaContains(this.bottomActionLeftArea, touch.windowX, touch.windowY) ||
+      this.bottomActionAreaContains(this.bottomActionRightArea, touch.windowX, touch.windowY)
+      ? HitTestMode.Default : HitTestMode.Transparent;
+  }
+
+  private bottomActionAreaContains(area: Area | undefined, x: number, y: number): boolean {
+    if (area === undefined) { return false; }
+    const left = Number(area.globalPosition.x);
+    const top = Number(area.globalPosition.y);
+    const width = Number(area.width);
+    const height = Number(area.height);
+    return width > 0 && height > 0 && x >= left && x < left + width && y >= top && y < top + height;
+  }
+
+  @Builder
   private bottomActionBar() {
     // 沉浸光感玻璃胶囊：左右两块独立悬浮胶囊（PR 的空 HdsTabs 材质画布方案），
     // 由全屏悬浮层单实例承载，正文从下方穿透直至物理底边（窗口为全屏布局，无避让空带）。
@@ -2126,7 +2135,8 @@ struct ContentDetailPage {
           // 右手判定走默认布局，与关闭开关时一致。
           if (this.gripFollowActions && this.gripIsLeftHand()) {
             Row() {
-              GlassCapsule({ useMaterial: this.immersiveMaterialSupported }) {
+              GlassCapsule({ useMaterial: this.immersiveMaterialSupported,
+                onBoundsMeasured: (area: Area): void => { this.bottomActionLeftArea = area; } }) {
                 this.questionRightActions()
               }
             }
@@ -2136,7 +2146,8 @@ struct ContentDetailPage {
               .layoutWeight(1)
 
             Row() {
-              GlassCapsule({ useMaterial: this.immersiveMaterialSupported }) {
+              GlassCapsule({ useMaterial: this.immersiveMaterialSupported,
+                onBoundsMeasured: (area: Area): void => { this.bottomActionRightArea = area; } }) {
                 if (this.followController !== undefined) {
                   this.followQuestionAction()
                 }
@@ -2144,7 +2155,8 @@ struct ContentDetailPage {
             }
               .transition(this.gripSwapTransition(-240))
           } else {
-            GlassCapsule({ useMaterial: this.immersiveMaterialSupported }) {
+            GlassCapsule({ useMaterial: this.immersiveMaterialSupported,
+                onBoundsMeasured: (area: Area): void => { this.bottomActionLeftArea = area; } }) {
               if (this.followController !== undefined) {
                 this.followQuestionAction()
               }
@@ -2153,7 +2165,8 @@ struct ContentDetailPage {
             Blank()
               .layoutWeight(1)
 
-            GlassCapsule({ useMaterial: this.immersiveMaterialSupported }) {
+            GlassCapsule({ useMaterial: this.immersiveMaterialSupported,
+                onBoundsMeasured: (area: Area): void => { this.bottomActionRightArea = area; } }) {
               this.questionRightActions()
             }
           }
@@ -2163,7 +2176,8 @@ struct ContentDetailPage {
             // 覆盖回答页、文章页等所有双胶囊详情页；右手判定走默认布局（操作胶囊在右侧），与关闭开关时一致。
             // GlassCapsule 是自定义组件不能链式通用属性，过渡挂在内容自适应的包裹容器上。
             Row() {
-              GlassCapsule({ useMaterial: this.immersiveMaterialSupported }) {
+              GlassCapsule({ useMaterial: this.immersiveMaterialSupported,
+                onBoundsMeasured: (area: Area): void => { this.bottomActionLeftArea = area; } }) {
                 this.answerRightActions()
               }
             }
@@ -2173,14 +2187,16 @@ struct ContentDetailPage {
               .layoutWeight(1)
 
             Row() {
-              GlassCapsule({ useMaterial: this.immersiveMaterialSupported }) {
+              GlassCapsule({ useMaterial: this.immersiveMaterialSupported,
+                onBoundsMeasured: (area: Area): void => { this.bottomActionRightArea = area; } }) {
                 this.answerVoteCapsule()
               }
             }
               .transition(this.gripSwapTransition(-240))
           } else {
             Row() {
-              GlassCapsule({ useMaterial: this.immersiveMaterialSupported }) {
+              GlassCapsule({ useMaterial: this.immersiveMaterialSupported,
+                onBoundsMeasured: (area: Area): void => { this.bottomActionLeftArea = area; } }) {
                 this.answerVoteCapsule()
               }
             }
@@ -2190,7 +2206,8 @@ struct ContentDetailPage {
               .layoutWeight(1)
 
             Row() {
-              GlassCapsule({ useMaterial: this.immersiveMaterialSupported }) {
+              GlassCapsule({ useMaterial: this.immersiveMaterialSupported,
+                onBoundsMeasured: (area: Area): void => { this.bottomActionRightArea = area; } }) {
                 this.answerRightActions()
               }
             }
@@ -2209,7 +2226,7 @@ struct ContentDetailPage {
     }
     .width('100%')
     .zIndex(2)
-    .hitTestBehavior(HitTestMode.Default)
+    .hitTestBehavior(HitTestMode.Transparent)
     .onAreaChange((_oldArea: Area, newArea: Area): void => {
       const height = Number(newArea.height);
       if (height > 0 && Math.abs(height - this.bottomActionBarHeightVp) > 1) {
@@ -3061,7 +3078,10 @@ struct ContentDetailPage {
 
   /** 切换回答/页面离开时归零 overscroll（animated=false 跳过回弹动画）。 */
   private resetAnswerOverscroll(animated: boolean): void {
-    if (this.answerOverscrollOffset === 0 && this.overscrollRawDrag === 0) { return; }
+    if (this.answerOverscrollOffset === 0 && this.overscrollRawDrag === 0) {
+      this.applyOverscrollOffset(0);
+      return;
+    }
     this.overscrollRawDrag = 0;
     if (animated) {
       this.getUIContext().animateTo({ curve: curves.springMotion(0.32, 0.78) }, (): void => {

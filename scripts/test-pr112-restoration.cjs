@@ -847,6 +847,90 @@ contract('comment-text-keeps-unsupported-fallback-and-all-supported-images-in-or
   assert.equal(stripCommentHtml(html), '文字[微笑]查看原图图片说明');
 });
 
+
+contract('feed-scroll-owner-ignores-hidden-feeds-and-resets-on-source-change', false, () => {
+  const values = new Map(); global.AppStorage = {get: key => values.get(key), setOrCreate: (key, value) => values.set(key, value)};
+  try {
+    const {setFeedScrollOwner, publishFeedScroll} = load(pages + 'FeedScrollOwnership.ets');
+    setFeedScrollOwner('home'); publishFeedScroll('home', 10); assert.equal(values.get('bottomBarHiddenByScroll'), true);
+    setFeedScrollOwner('hot'); assert.equal(values.get('bottomBarHiddenByScroll'), false);
+    publishFeedScroll('home', 20); assert.equal(values.get('bottomBarHiddenByScroll'), false);
+    publishFeedScroll('hot', 20); assert.equal(values.get('bottomBarHiddenByScroll'), true);
+    setFeedScrollOwner('hot'); assert.equal(values.get('bottomBarHiddenByScroll'), true);
+    setFeedScrollOwner(''); publishFeedScroll('hot', 20); assert.equal(values.get('bottomBarHiddenByScroll'), false);
+    setFeedScrollOwner('following'); publishFeedScroll('following-recommend', 20);
+    assert.equal(values.get('bottomBarHiddenByScroll'), false);
+  } finally {delete global.AppStorage;}
+});
+contract('tab-order-and-following-subtab-broadcast-stable-scroll-owner', false, () => {
+  const values = new Map(); const owners = []; const TopLevelTab = {HOME:0,FOLLOWING:1,HOT:2,DAILY:3,HISTORY:4,COLLECTIONS:5,ACCOUNT:6};
+  const H = methodHarness(pages + 'AppShell.ets', 'broadcastBottomBarScrollOwner', {
+    TopLevelTab, setFeedScrollOwner: key => owners.push(key), AppStorage: {setOrCreate: (key,value) => values.set(key,value)}
+  });
+  const p = new H(); p.bottomBarOrder = [6,3,0,5,1,2,4]; p.topLevelTabIndex = 0;
+  p.scrollKeysForTab = tab => [['home'],['recommend'],['hot'],['daily']][tab] || [];
+  p.broadcastBottomBarScrollOwner(); assert.equal(owners.at(-1), ''); assert.equal(values.get('topLevelFeedTabActive'), false);
+  p.topLevelTabIndex = 4; p.broadcastBottomBarScrollOwner(); assert.equal(owners.at(-1),'recommend');
+  p.scrollKeysForTab = () => ['following']; p.broadcastBottomBarScrollOwner(); assert.equal(owners.at(-1),'following');
+});
+contract('progress-hide-cancels-drag-timers-and-waits-for-real-scroll-after-switch', false, () => {
+  const file = pages + 'components/ReadingProgressBar.ets'; const cleared=[]; const notices=[];
+  const H = methodHarness(file, 'resetBar');
+  for (const name of ['onAvailabilityChanged', 'onBarInputChanged', 'notifySeekEnd']) {
+    H.prototype[name] = methodHarness(file, name, { }).prototype[name];
+  }
+  const p = new H(); p.clearFadeTimer = () => cleared.push('fade'); p.clearUnmountTimer = () => cleared.push('unmount');
+  p.dragging=true; p.alpha=1; p.mounted=true; p.seekNotified=true; p.onSeekStateChange = x => notices.push(x);
+  p.onAvailabilityChanged(); assert.equal(p.dragging,false); assert.equal(p.mounted,false); assert.equal(p.alpha,0);
+  assert.deepEqual(notices,[false]); assert.deepEqual(cleared,['fade','unmount']);
+  p.active=true; p.switchActive=true; p.scrollable=()=>true; let shown=0;
+  p.showBar=()=>shown++; p.scheduleFadeOut=()=>{}; p.onBarInputChanged(); assert.equal(shown,0);
+  p.switchActive=false; p.onAvailabilityChanged(); assert.equal(shown,0); p.onBarInputChanged(); assert.equal(shown,1);
+});
+contract('window-listener-registration-failure-can-retry-and-old-window-event-is-inert', false, () => {
+  const H = methodHarness('entry/src/main/ets/entryability/EntryAbility.ets', 'ensureAvoidAreaListener', {
+    window:{AvoidAreaType:{TYPE_SYSTEM:0,TYPE_NAVIGATION_INDICATOR:1}}
+  });
+  const p=new H(); p.windowGeneration=1;p.avoidAreaListening=false;p.windowCleanup=[];
+  const listeners=[]; let fails=true; let published=0; let logged=0;
+  const w={on:(_event,callback)=>{if(fails)throw Error('1300002');listeners.push(callback);},off(){}};
+  p.logWindowListenerFailure=()=>logged++;p.publishAvoidArea=()=>published++;
+  p.ensureAvoidAreaListener(w,1); assert.equal(logged,1);assert.equal(p.avoidAreaListening,false);
+  fails=false;p.ensureAvoidAreaListener(w,1);assert.equal(p.avoidAreaListening,true);assert.equal(p.windowCleanup.length,1);
+  listeners[0]({type:0,area:{}});assert.equal(published,1);p.windowGeneration=2;
+  listeners[0]({type:0,area:{}});assert.equal(published,1);
+});
+contract('zero-local-overscroll-reset-still-clears-global-transition-state', false, () => {
+  const H=methodHarness(pages+'ContentDetailPages.ets','resetAnswerOverscroll');const p=new H();
+  p.answerOverscrollOffset=0;p.overscrollRawDrag=0;const offsets=[];p.applyOverscrollOffset=x=>offsets.push(x);
+  p.resetAnswerOverscroll(false);assert.deepEqual(offsets,[0]);
+});
+
+
+contract('bottom-actions-hit-only-visible-capsules-and-keep-child-buttons-enabled', false, () => {
+  const H=methodHarness(pages+'ContentDetailPages.ets','bottomActionHitTest',{ContentDetailKind,HitTestMode:{None:0,Transparent:1,Default:2}});
+  H.prototype.bottomActionAreaContains=methodHarness(pages+'ContentDetailPages.ets','bottomActionAreaContains').prototype.bottomActionAreaContains;
+  const p=new H();p.pageActive=true;p.immersiveReading=false;p.kind=ContentDetailKind.ANSWER;p.answerOverscrollOffset=0;
+  p.bottomActionLeftArea={globalPosition:{x:12,y:640},width:120,height:48};
+  p.bottomActionRightArea={globalPosition:{x:300,y:640},width:140,height:48};
+  const event=(x,y)=>({touches:[{windowX:x,windowY:y}]});
+  assert.equal(p.bottomActionHitTest(event(50,650)),2);assert.equal(p.bottomActionHitTest(event(350,650)),2);
+  assert.equal(p.bottomActionHitTest(event(200,650)),1);assert.equal(p.bottomActionHitTest(event(350,700)),1);
+  assert.equal(p.bottomActionHitTest(event(350,500)),1);assert.equal(p.bottomActionHitTest({touches:[]}),1);
+  p.answerOverscrollOffset=1;assert.equal(p.bottomActionHitTest(event(50,650)),0);
+  p.answerOverscrollOffset=0;p.pageActive=false;assert.equal(p.bottomActionHitTest(event(50,650)),0);
+});
+
+
+contract('offscreen-identity-keeps-normal-title-measurement-across-immersive-mode', false, () => {
+  const {AnswerTitleGeometry}=load(pages+'AnswerTitleGeometry.ets');const geometry=new AnswerTitleGeometry();
+  geometry.measure('doc','body',180);assert.equal(geometry.resolve('doc','body',400,94,94,false,true).compact,true);
+  geometry.measure('doc','immersive',40);geometry.resolve('doc','immersive',400,0,0,false,true);
+  const restored=geometry.resolve('doc','body',400,94,94,false,true);
+  assert.equal(restored.compact,true);assert.equal(restored.authorVisible,true);
+  geometry.retain([]);assert.equal(geometry.measured('doc','body'),false);assert.equal(geometry.measured('doc','immersive'),false);
+});
+
 (async () => {
   let failed = 0;
   let selected = 0;

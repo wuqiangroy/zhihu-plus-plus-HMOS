@@ -44,6 +44,7 @@ export struct FeedContentSummary {
       }
       if (this.showStatistics) {
         Text(`${this.target.voteupCount ?? '—'} 赞同 · ${this.target.commentCount ?? '—'} 评论`)
+          .width('100%')
           .fontSize($r('app.float.secondary_font_size'))
           .fontColor($r('app.color.secondary_text'))
       }

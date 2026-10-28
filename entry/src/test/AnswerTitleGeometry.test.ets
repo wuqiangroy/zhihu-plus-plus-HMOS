@@ -3,6 +3,20 @@ import { AnswerTitleGeometry } from '../main/ets/pages/AnswerTitleGeometry';
 
 export default function answerTitleGeometryTest(): void {
   describe('answerTitleGeometryTest', () => {
+    it('restoresBodyMeasurementAfterOffscreenImmersiveRoundTrip', 0, () => {
+      const geometry = new AnswerTitleGeometry();
+      geometry.measure('doc', 'body', 180);
+      expect(geometry.resolve('doc', 'body', 400, 94, 94, false, true).compact).assertTrue();
+      geometry.measure('doc', 'immersive', 40);
+      geometry.resolve('doc', 'immersive', 400, 0, 0, false, true);
+      const restored = geometry.resolve('doc', 'body', 400, 94, 94, false, true);
+      expect(restored.compact).assertTrue();
+      expect(restored.authorVisible).assertTrue();
+      geometry.retain([]);
+      expect(geometry.measured('doc', 'body')).assertFalse();
+      expect(geometry.measured('doc', 'immersive')).assertFalse();
+    });
+
     it('doesNotGuessIdentityBeforeLayout', 0, () => {
       const geometry = new AnswerTitleGeometry();
       const state = geometry.resolve('a:1', 'body', 900, 94, 94, false, true);

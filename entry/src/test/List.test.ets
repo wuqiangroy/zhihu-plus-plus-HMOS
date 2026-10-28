@@ -1,3 +1,4 @@
+import systemBarVisibilityTest from './SystemBarVisibility.test';
 import hotCommentLifecycleTest from './HotCommentLifecycle.test';
 import answerTitleGeometryTest from './AnswerTitleGeometry.test';
 import answerPanePreparationTest from './AnswerPanePreparation.test';
@@ -217,6 +218,7 @@ export default function testsuite(): void {
   continuousAnswerLifecycleTest();
   continuousReferenceNavigatorTest();
   linkCardMetaLoaderTest();
+  systemBarVisibilityTest();
   hotCommentLifecycleTest();
   hotCommentStateTest();
   commentTextTest();

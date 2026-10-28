@@ -12,7 +12,7 @@ interface AnswerIdentityMeasurement {
 }
 
 export class AnswerTitleGeometry {
-  private readonly measurements: Map<string, AnswerIdentityMeasurement> = new Map();
+  private readonly measurements: Map<string, Map<string, AnswerIdentityMeasurement>> = new Map();
 
   retain(keys: string[]): void {
     for (const key of Array.from(this.measurements.keys())) {
@@ -21,22 +21,28 @@ export class AnswerTitleGeometry {
   }
 
   measured(key: string, layout: string): boolean {
-    return this.measurements.get(key)?.layout === layout;
+    return this.measurements.get(key)?.has(layout) === true;
   }
 
   measure(key: string, layout: string, height: number): boolean {
     if (!Number.isFinite(height) || height < 0) { return false; }
-    const previous = this.measurements.get(key);
-    if (previous?.layout === layout && previous.height === height) { return false; }
-    this.measurements.set(key, { layout: layout, height: height,
-      presentation: previous?.layout === layout ? previous.presentation : this.empty() });
+    let layouts = this.measurements.get(key);
+    if (layouts === undefined) {
+      layouts = new Map<string, AnswerIdentityMeasurement>();
+      this.measurements.set(key, layouts);
+    }
+    const previous = layouts.get(layout);
+    if (previous?.height === height) { return false; }
+    // 沉浸切换时信息头可能已离屏；保留普通模式实测，返回时不依赖再次挂载测量。
+    layouts.set(layout, { layout: layout, height: height,
+      presentation: previous?.presentation ?? this.empty() });
     return true;
   }
 
   resolve(key: string, layout: string, offset: number, contentInset: number, viewportTop: number,
     persistent: boolean, hasAuthor: boolean): AnswerTitlePresentation {
-    const measured = this.measurements.get(key);
-    const valid = measured !== undefined && measured.layout === layout;
+    const measured = this.measurements.get(key)?.get(layout);
+    const valid = measured !== undefined;
     const previous = valid ? measured.presentation : this.empty();
     // 信息头起点 = List 的 16vp 顶部 padding + 可滚动让位；信息区下缘越过有效视口才接管身份。
     const bottom = valid ? 16 + contentInset + measured.height - offset - viewportTop : Number.POSITIVE_INFINITY;

@@ -1,3 +1,5 @@
+import { FeedThumbnail } from './components/FeedThumbnail';
+import { publishFeedScroll } from './FeedScrollOwnership';
 import {
   buildFeedFlowLayout,
   feedAnchorFlowIndex,
@@ -316,9 +318,7 @@ export struct ChannelFeedPage {
           .id(`channel_${this.source}_list`)
           .width('100%')
           .onDidScroll((offset: number): void => {
-              if (offset !== 0) {
-                AppStorage.setOrCreate('bottomBarHiddenByScroll', offset > 0);
-              }
+              publishFeedScroll(this.source, offset);
             })
             // 记录手势起手时是否在顶部：从列表中间回滑到顶部后继续下拉的过冲
             // 也会被 Refresh 判成下拉刷新，需要据此区分。
@@ -577,12 +577,10 @@ export struct ChannelFeedPage {
           summaryMaxLines: this.feedColumns > 1 ? 2 : 3
         })
         if (this.showFeedThumbnail && (item.feedItem.target.thumbnailUrl ?? '').length > 0) {
-          Image(item.feedItem.target.thumbnailUrl)
+          FeedThumbnail({ url: item.feedItem.target.thumbnailUrl ?? '' })
             .width('100%')
             .height(128)
             .borderRadius($r('app.float.spacing_small'))
-            .objectFit(ImageFit.Cover)
-            .alt('内容缩略图')
         }
         if (this.source === ChannelFeedSource.HOT && item.feedItem.target.kind === FeedTargetKind.QUESTION) {
           HotQuestionStatistics({ target: item.feedItem.target, repositoryFactory: this.questionRepositoryFactory })
@@ -641,12 +639,10 @@ export struct ChannelFeedPage {
       if (this.feedColumns > 1) {
         Column({ space: $r('app.float.spacing_small') }) {
           if (this.showFeedThumbnail && item.story.imageUrl !== undefined && /^https:\/\/[^\s]+$/i.test(item.story.imageUrl)) {
-            Image(item.story.imageUrl)
+            FeedThumbnail({ url: item.story.imageUrl ?? '' })
               .width('100%')
               .aspectRatio(1.6)
               .borderRadius($r('app.float.spacing_small'))
-              .objectFit(ImageFit.Cover)
-              .alt('日报缩略图')
           } else {
             // 无缩略图（或偏好关闭）时的等比占位，维持整卡高度一致
             Column()
@@ -678,12 +674,10 @@ export struct ChannelFeedPage {
       } else {
         Row({ space: $r('app.float.spacing_medium') }) {
           if (this.showFeedThumbnail && item.story.imageUrl !== undefined && /^https:\/\/[^\s]+$/i.test(item.story.imageUrl)) {
-            Image(item.story.imageUrl)
+            FeedThumbnail({ url: item.story.imageUrl ?? '' })
               .width('28%')
               .aspectRatio(1)
               .borderRadius($r('app.float.spacing_small'))
-              .objectFit(ImageFit.Cover)
-              .alt('日报缩略图')
           }
           Column({ space: $r('app.float.spacing_small') }) {
             Text(item.story.title)

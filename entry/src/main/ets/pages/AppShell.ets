@@ -1,3 +1,4 @@
+import { setFeedScrollOwner } from './FeedScrollOwnership';
 import { updateStatusBarAppearance } from '../platform/SystemBars';
 import { QuestionTitleBar } from './QuestionTitleBar';
 import { SearchTitleBar } from './SearchTitleBar';
@@ -316,6 +317,7 @@ export struct AppShell {
       }
     });
     this.tabScrollerBindings = next;
+    this.broadcastBottomBarScrollOwner();
   }
 
   private tabScrollerBinding(tab: number): Array<Scroller> {
@@ -2818,7 +2820,8 @@ export struct AppShell {
    * 收回标记并强制回显，避免离屏信息流重建/惯性滚动留下的旧标记把底栏隐藏掉。 */
   private broadcastBottomBarScrollOwner(): void {
     const tab: number | undefined = this.bottomBarOrder[this.topLevelTabIndex];
-    const feedTab: boolean = tab !== undefined && tab <= TopLevelTab.DAILY;
+    const feedTab: boolean = tab !== undefined && tab >= TopLevelTab.HOME && tab <= TopLevelTab.DAILY;
+    setFeedScrollOwner(feedTab ? (this.scrollKeysForTab(tab ?? TopLevelTab.HOME)[0] ?? '') : '');
     AppStorage.setOrCreate('topLevelFeedTabActive', feedTab);
     if (!feedTab) {
       AppStorage.setOrCreate('bottomBarHiddenByScroll', false);
