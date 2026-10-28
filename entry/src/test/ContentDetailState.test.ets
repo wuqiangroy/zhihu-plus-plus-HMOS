@@ -49,7 +49,7 @@ class ControlledContentRepository implements ContentRepository {
     });
   }
 
-  getAnswer(_id: string): Promise<Answer> {
+  getAnswer(_id: string, _preferCache?: boolean): Promise<Answer> {
     return Promise.resolve(this.answer);
   }
 
@@ -74,7 +74,7 @@ class HttpFailingContentRepository implements ContentRepository {
     throw this.failure;
   }
 
-  async getAnswer(_id: string): Promise<Answer> {
+  async getAnswer(_id: string, _preferCache?: boolean): Promise<Answer> {
     throw this.failure;
   }
 

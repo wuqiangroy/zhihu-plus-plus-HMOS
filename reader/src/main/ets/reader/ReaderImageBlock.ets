@@ -5,6 +5,16 @@ import { ImageDisplaySize, computeImageDisplaySize } from './ReaderImageSizing';
 /** 加载完成前的占位宽高比（加载后按源图比例覆盖）。 */
 const IMAGE_PLACEHOLDER_ASPECT_RATIO = 4 / 3;
 
+/**
+ * 打开大图的轻点判定容差。
+ *
+ * 图片上滑动手势与页面级「左右滑动切换回答」并行识别：左右滑时 PanGesture 切换回答，
+ * 而 Image 的 onClick 仍会在抬手时按点击语义触发，导致「滑一下同时打开大图 + 切回答」。
+ * 因此改为原始 touch 判定，位移超过容差或按住过久都不打开预览。
+ */
+const IMAGE_TAP_SLOP_VP = 12;
+const IMAGE_TAP_MAX_DURATION_MS = 300;
+
 /** 屏幕视口（vp）与密度：像素原大小折算 vp、屏幕占比计算共用。 */
 interface ScreenViewport {
   width: number;
@@ -48,6 +58,46 @@ export struct ReaderImageBlock {
   private naturalPixelSize: ImageDisplaySize = { width: 0, height: 0 };
   /** 正文容器可用宽度（vp）：显示宽度上限，避免超出排版宽度溢出。 */
   private availableWidthVp: number = 0;
+  /** 本次触摸起点与时刻：用于区分轻点与滑动（滑动不打开大图）。 */
+  private tapDownX: number = 0;
+  private tapDownY: number = 0;
+  private tapDownTime: number = 0;
+  /** 当前手势是否已判为拖动（位移超出容差或收到 Cancel）。 */
+  private tapMoved: boolean = true;
+
+  /** 轻点抬手：未拖动、未长按且图片加载成功才打开大图。 */
+  private handleImageTouch(event: TouchEvent): void {
+    const touch: TouchObject | undefined = event.touches[0];
+    if (touch === undefined) {
+      return;
+    }
+    if (event.type === TouchType.Down) {
+      this.tapDownX = touch.windowX;
+      this.tapDownY = touch.windowY;
+      this.tapDownTime = Date.now();
+      this.tapMoved = false;
+      return;
+    }
+    if (event.type === TouchType.Move) {
+      if (Math.abs(touch.windowX - this.tapDownX) > IMAGE_TAP_SLOP_VP ||
+        Math.abs(touch.windowY - this.tapDownY) > IMAGE_TAP_SLOP_VP) {
+        this.tapMoved = true;
+      }
+      return;
+    }
+    if (event.type === TouchType.Up) {
+      const isTap: boolean = !this.tapMoved && !this.failed &&
+        Date.now() - this.tapDownTime <= IMAGE_TAP_MAX_DURATION_MS;
+      this.tapMoved = true;
+      if (isTap) {
+        this.onPreview(this.item.sourceUrl);
+      }
+      return;
+    }
+    if (event.type === TouchType.Cancel) {
+      this.tapMoved = true;
+    }
+  }
 
   private imageSource(): string {
     if (this.retryRevision === 0) {
@@ -100,10 +150,8 @@ export struct ReaderImageBlock {
         .onError(() => {
           this.failed = true;
         })
-        .onClick(() => {
-          if (!this.failed) {
-            this.onPreview(this.item.sourceUrl);
-          }
+        .onTouch((event: TouchEvent): void => {
+          this.handleImageTouch(event);
         })
 
       if (this.item.text.length > 0) {

@@ -102,6 +102,8 @@ import segmentReactionRepositoryTest from './SegmentReactionRepository.test';
 import continuousStreamDataSourceTest from './ContinuousStreamDataSource.test';
 import linkCardMetaLoaderTest from './LinkCardMetaLoader.test';
 import continuousAnswerStateTest from './ContinuousAnswerState.test';
+import hotCommentStateTest from './HotCommentState.test';
+import commentTextTest from './CommentText.test';
 
 export default function testsuite(): void {
   feedWaterfallLayoutTest();
@@ -208,4 +210,6 @@ export default function testsuite(): void {
   continuousAnswerLifecycleTest();
   continuousReferenceNavigatorTest();
   linkCardMetaLoaderTest();
+  hotCommentStateTest();
+  commentTextTest();
 }

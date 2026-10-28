@@ -374,7 +374,7 @@ export struct ContentImagePreview {
     const payload: ShareImagePayload = {
       kind: SharePayloadKind.IMAGE,
       title: '知乎图片',
-      summary: '来自知乎++的受信图片链接',
+      summary: '来自知乎Plus的受信图片链接',
       sourceKind: ShareImageSourceKind.TRUSTED_URL,
       trustedImageUrl: this.url
     };
@@ -438,6 +438,9 @@ export struct NativeContentDocument {
   /**
    * 滚动内容起始内缩（vp）：让视口延伸到悬浮标题栏之下、由内容自身让位，
    * 滚动时正文才会从玻璃顶栏下穿过（顶栏占位式布局下内容到不了顶栏后面，无透光）。
+   * 实现为首个列表项的上内边距（随内容一起滚走），不能用 List.contentStartOffset：
+   * HDS 会把 contentStartOffset 这段内缩排除在滚动距离之外，顶栏渐变模糊要等
+   * 正文滚过约 94vp（内容抵达屏幕顶端）才开始出现。
    * 0 表示不额外让位（沉浸阅读隐藏顶栏 / 非详情页场景）。
    */
   @Prop topInsetVp: number = 0;
@@ -647,6 +650,13 @@ export struct NativeContentDocument {
     if (!this.readingLayout || this.positionKey.length === 0 || context === undefined || this.empty) { return; }
     try {
       this.positionStore = createReaderPositionStore(context);
+      // 同页切换到的相邻回答（非路由入口内容）不恢复进度：左滑/上下滑进来一律从顶部开始，
+      // 否则会停在上一篇离开时的位置，上一篇读了半截或贴底时就会"一进来跑到最下面"。
+      // 进度仍继续记录，以便以后从外部直接打开这篇时续读。
+      if (this.positionOwnerKey.length > 0 && this.positionKey !== this.positionOwnerKey) {
+        this.positionWritable = true;
+        return;
+      }
       const saved = this.positionStore.load(this.positionKey);
       const index = saved === undefined ? -1 : readerPositionBlockIndex(saved, this.blocks);
       if (saved !== undefined && (saved.blockIndex === -1 || index >= 0)) {
@@ -870,8 +880,13 @@ export struct NativeContentDocument {
     Stack({ alignContent: Alignment.TopEnd }) {
       List({ space: this.blockSpacing(), scroller: this.scroller }) {
           ListItem() { this.documentHeader() }
+            // 悬浮顶栏让位放在首个列表项的上内边距里（随内容滚走）：未滚动时信息头
+            // 仍从顶栏下方开始，滚动后正文立刻从玻璃顶栏背后穿过，HDS 渐变模糊随起手出。
             // List.space 已含段间距，仅补足信息头与正文之间的留白；大段间距偏好不被压缩。
-            .padding({ bottom: this.readingLayout ? Math.max(0, 24 - this.blockSpacing()) : 0 })
+            .padding({
+              top: this.topInsetVp,
+              bottom: this.readingLayout ? Math.max(0, 24 - this.blockSpacing()) : 0
+            })
             .onAreaChange((_oldArea: Area, newArea: Area): void => {
               this.reportChromeHeight('header', newArea);
             })
@@ -931,9 +946,6 @@ export struct NativeContentDocument {
         })
         // 末尾避让随正文滚动，避免底部 padding 压缩视口、在悬浮操作栏下方形成固定留白。
         .contentEndOffset(this.bottomInsetVp)
-        // 起始内缩随正文滚动（同 contentEndOffset 思路）：视口可延伸到悬浮顶栏之下，
-        // 未滚动时正文仍从顶栏下方开始，滚动后正文从玻璃顶栏背后穿过。
-        .contentStartOffset(this.topInsetVp)
         .cachedCount(6)
         .edgeEffect(this.disableEdgeSpring ? EdgeEffect.None : EdgeEffect.Spring)
         .onAreaChange((_oldArea: Area, newArea: Area): void => {

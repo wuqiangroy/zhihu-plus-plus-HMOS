@@ -165,7 +165,8 @@ export default function questionAnswerFeedTest(): void {
     });
 
     it('navigatorSeedlessFallsBackToFirstWhenCurrentAbsent', 0, async () => {
-      // 当前回答不在列表里（如被过滤）：首个非当前回答作为下一答。
+      // 当前回答不在列表里（如被过滤）：首个非当前回答作为下一答；
+      // 切走后「上一答」仍要能滑回入口回答（否则左滑之后无法右滑回来）。
       const repository = new FakeQuestionAnswerRepository([
         { items: [content('7'), content('8')],
           cursor: { isEnd: true, isStart: true, page: 1, total: 2 } }
@@ -176,7 +177,13 @@ export default function questionAnswerFeedTest(): void {
       const preview = navigator.nextAnswerPreview();
       expect(preview?.answerId).assertEqual('7');
       expect(await navigator.move(1)).assertEqual('7');
+      // 入口回答不在列表里，但它仍作为列表首条之前的"虚拟上一答"存在。
+      expect(navigator.hasPrevious()).assertTrue();
+      expect(navigator.previousAnswerPreview()?.answerId).assertEqual('99');
+      expect(await navigator.move(-1)).assertEqual('99');
       expect(navigator.hasPrevious()).assertFalse();
+      // 回到入口后再左滑仍是列表首条。
+      expect(await navigator.move(1)).assertEqual('7');
       navigator.dispose();
     });
   });

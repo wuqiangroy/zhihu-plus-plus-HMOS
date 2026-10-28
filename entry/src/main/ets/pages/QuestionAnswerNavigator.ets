@@ -23,6 +23,10 @@ export class QuestionAnswerNavigator {
   private index: number;
   /** 当前回答 id：种子列表可能不含（信息流直达），索引待列表加载后回填。 */
   private currentAnswerId: string;
+  /** 打开本页时的那条回答：信息流直达的回答可能不在已加载的回答列表里（默认排序首屏不一定包含它），
+   *  此时它是列表首条之前的"虚拟上一答"，否则切走后无法反向滑回来。 */
+  private readonly entryAnswerId: string;
+  private entryOutsideList: boolean = false;
   private busy: boolean = false;
   private active: boolean = true;
   private readonly onStateChange?: () => void;
@@ -30,6 +34,7 @@ export class QuestionAnswerNavigator {
   constructor(questionId: string, answerId: string, seed: QuestionAnswersViewState | undefined,
     repository: QuestionAnswerFeedRepository, onStateChange?: () => void) {
     this.currentAnswerId = answerId;
+    this.entryAnswerId = answerId;
     this.index = seed?.items.findIndex((item): boolean => item.feedItem.target.id === answerId) ?? -1;
     this.onStateChange = onStateChange;
     this.controller = new QuestionAnswersController(repository, questionId,
@@ -43,6 +48,10 @@ export class QuestionAnswerNavigator {
       const located = state.items.findIndex((item): boolean => item.feedItem.target.id === this.currentAnswerId);
       if (located >= 0) {
         this.index = located;
+        this.entryOutsideList = false;
+      } else {
+        // 当前回答不在列表里（刚回到虚拟上一答，或入口回答确实缺席）：保留反向可回。
+        this.entryOutsideList = true;
       }
     }
     if (this.onStateChange !== undefined) {
@@ -77,6 +86,11 @@ export class QuestionAnswerNavigator {
   /** 上一答预览数据：首答（无上一答）返回 undefined。 */
   previousAnswerPreview(): AnswerNavigationPreview | undefined {
     if (!this.hasPrevious()) { return undefined; }
+    if (this.index === 0 && this.entryOutsideList) {
+      // 入口回答不在列表里：没有作者/摘要可预览，只带 id，等正文从缓存出来后自然回填。
+      return { answerId: this.entryAnswerId, authorName: '', authorAvatarUrl: '', authorHeadline: '',
+        excerpt: '', voteupCount: 0, commentCount: 0, detailLoaded: false };
+    }
     const target = this.controller.snapshot().items[this.index - 1]?.feedItem.target;
     if (target === undefined) {
       return { answerId: '', authorName: '', authorAvatarUrl: '', authorHeadline: '', excerpt: '',
@@ -94,7 +108,8 @@ export class QuestionAnswerNavigator {
     };
   }
 
-  hasPrevious(): boolean { return this.index > 0; }
+  /** 上一答：列表首条之前还有"入口回答"时也算有（信息流直达的常见情形）。 */
+  hasPrevious(): boolean { return this.index > 0 || (this.index === 0 && this.entryOutsideList); }
   hasNext(): boolean {
     const state = this.controller.snapshot();
     if (this.index >= 0) {
@@ -122,6 +137,12 @@ export class QuestionAnswerNavigator {
     }
     this.busy = true;
     try {
+      // 反向回到入口回答：它在列表首条之前，索引退回"未定位"（-1），下次状态更新仍会尝试重新定位。
+      if (direction === -1 && this.index === 0 && this.entryOutsideList) {
+        this.index = -1;
+        this.currentAnswerId = this.entryAnswerId;
+        return this.currentAnswerId;
+      }
       if (direction === 1 && this.index + 1 >= this.controller.snapshot().items.length && this.hasNext()) {
         await this.controller.loadMore();
       }

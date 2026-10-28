@@ -2,9 +2,11 @@ import { QuestionAnswerDataSource } from './QuestionAnswerDataSource';
 import { AnswerNavigationPreview, QuestionAnswerNavigator, stageQuestionAnswerNavigator, takeQuestionAnswerNavigator } from './QuestionAnswerNavigator';
 import { ContentImagePreview } from './NativeContentDocument';
 import { publishQuestionTitle } from './QuestionTitleBar';
-import { publishAnswerTitle, AnswerTitleBar } from './AnswerTitleBar';
+import { publishAnswerTitle } from './AnswerTitleBar';
 import { publishArticleTitle } from './ArticleTitleBar';
 import { FeedContentSummary } from './components/FeedContentSummary';
+import { HotCommentSection } from './components/HotCommentSection';
+import { HOT_COMMENT_PREVIEW_LIMIT, hotCommentPreview } from './HotCommentState';
 import {
   AppPageStatusKind,
   AppPageStatusPanel,
@@ -36,7 +38,11 @@ import {
   ChannelContentItem,
   CollectionRepository,
   CollectionSummary,
+  CommentContentKind,
+  CommentItem,
+  CommentPage,
   CommentRepository,
+  CommentSortOrder,
   ContentDetailKind,
   ContentRepository,
   ContentVoteState,
@@ -111,6 +117,13 @@ import { SegmentPill } from './components/SegmentPill';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { adaptiveOverlayWidth, isWideOverlayContainer, ADAPTIVE_OVERLAY_TASK_MAX_WIDTH_VP, ADAPTIVE_OVERLAY_MENU_WIDTH_VP } from '../common/style/AdaptiveOverlayLayout';
 
+/** 横向切换提交过渡：方向 + 目标回答快照。
+ * 松手判定切换后导航索引立即前进，实时预览会换成另一条回答，过渡期间必须冻结为释放瞬间的快照。 */
+interface AnswerSwitchTransition {
+  readonly previous: boolean;
+  readonly preview: AnswerNavigationPreview | undefined;
+}
+
 @Component
 struct ContentDetailPage {
   kind: ContentDetailKind = ContentDetailKind.QUESTION;
@@ -123,12 +136,16 @@ struct ContentDetailPage {
   @State private answerOverscrollOffset: number = 0;
   /** 回答页可视宽度（vp）：横向相邻回答从左右整页之外随手势滑入。 */
   @State private answerViewportWidthVp: number = 0;
+  /** 回答页可视高度（vp）：纵向相邻回答从上下整页之外随手势滑入。 */
+  @State private answerViewportHeightVp: number = 0;
   /** 正文是否贴在列表底边（NativeContentDocument 回推）。 */
   @State private contentAtBottom: boolean = false;
   /** 正文是否贴在列表顶边（NativeContentDocument 回推）。 */
   @State private contentAtTop: boolean = true;
   /** overscroll 原始拖动累计量（阻尼换算前）。 */
   private overscrollRawDrag: number = 0;
+  /** 横向切换提交过渡（松手后整页滑出 → 换页 → 冻结页消失）；undefined 表示无过渡。 */
+  @State private answerSwitchTransition: AnswerSwitchTransition | undefined = undefined;
   /** 正文存在选区（长按建词/拖选扩展中）：过滑 pan 让位，防止拖选位移被误判为切换。 */
   private bodyTextSelectionActive: boolean = false;
   /** 阅读排版偏好（AppStorage 广播键，与 NativeContentDocument 同源）：横向预览页摘要排版对齐正文。 */
@@ -174,11 +191,14 @@ struct ContentDetailPage {
   private indicator?: FeedPullDownIndicatorHost = undefined;
   private questionScrolled: boolean = false;
   /** 回答页顶栏折叠：问题标题已滚出视口（经 AppStorage 驱动 HDS 标题栏折叠态）。 */
-  private answerQuestionScrolled: boolean = false;
+  @State private answerQuestionScrolled: boolean = false;
   /** 文章页顶栏折叠：文章标题已滚出视口（经 AppStorage 驱动 HDS 标题栏折叠态）。 */
   private articleTitleScrolled: boolean = false;
   /** 详情页滚动信息头中主标题实测高度（vp）：折叠阈值的动态基准；未测得前按单行估算。 */
   private contentTitleHeightVp: number = 0;
+  /** 问题标题缓存：同一问题内所有回答共用且不会变化，切回答时 LOADING 阶段 content 会被
+   * 清空，预览页/加载期间沿用最后一次标题，避免标题先空白再出现。 */
+  private answerQuestionTitleSnapshot: string = '';
   private pageActive: boolean = false;
   repository: ContentRepository | undefined = undefined;
   /** 推荐阅读卡片站内元数据仓库：赞同/评论计数与资源类型（正文 link-card 展示）。 */
@@ -225,14 +245,24 @@ struct ContentDetailPage {
   /** 详情收藏态：任一收藏夹含此内容即已收藏（对齐上游 ArticleViewModel.isFavorited），驱动右下角书签图标 */
   @State private contentFavorited: boolean = false;
   private favoriteStateContentId: string = '';
+  /** 回答尾部热门评论预览（按热度排序的根评论，最多 HOT_COMMENT_PREVIEW_LIMIT 条）。 */
+  @State private hotComments: Array<CommentItem> = [];
+  @State private hotCommentsLoading: boolean = false;
+  /** 热评对应的回答 ID：回包时校验，避免切换回答后旧请求覆盖新内容。 */
+  private hotCommentsAnswerId: string = '';
   /** 详情页双击正文动作（对齐上游 answerDoubleTapAction）：AppStorage 广播跨页同步
    * （详情页 Ask 面板与设置页改动互见），默认询问并记住。 */
   @StorageProp('answerDoubleTapAction') private answerDoubleTapAction: AnswerDoubleTapAction =
     AnswerDoubleTapAction.ASK;
   @StorageProp('titleAutoHide') private titleAutoHide: boolean = false;
+  /** 问题标题并入顶栏（外观设置）：开启后回答页正文信息头不再重复展示问题标题，
+   *  首屏即由顶栏承载（两行，过长省略），滚动后折叠为单行 + 答主。 */
+  @StorageProp('questionInTitleBar') private questionInTitleBar: boolean = false;
   @StorageProp('autoHideArticleBottomBar') private autoHideArticleBottomBar: boolean = false;
   @StorageProp('buttonSkipAnswer') private buttonSkipAnswer: boolean = true;
   @StorageProp('autoHideSkipAnswerButton') private autoHideSkipAnswerButton: boolean = true;
+  /** 回答页底部热评卡片开关：关闭后不拉取也不渲染。 */
+  @StorageProp('showHotComments') private showHotComments: boolean = true;
   /** 操作跟随智感握姿（设置页广播）：开启后跳转按钮与收藏/评论/更多胶囊吸附握持侧。 */
   @StorageProp('gripFollowActions') @Watch('onGripFollowActionsChanged') private gripFollowActions: boolean = false;
   /** 原生智感握姿能力（SystemCapability.MultimodalAwareness.Motion，握持手识别 API 20+）：
@@ -387,6 +417,7 @@ struct ContentDetailPage {
     this.voteController = undefined;
     this.followController = undefined;
     this.answerNavigator?.pause();
+    this.answerSwitchTransition = undefined;
     this.resetAnswerOverscroll(false);
     this.contentAtBottom = false;
     this.pendingUserBlock = undefined;
@@ -682,22 +713,30 @@ struct ContentDetailPage {
           this.statusPanel('正在加载内容…', false)
         } else if (this.phase === ContentDetailPhase.ERROR) {
           this.statusPanel(this.errorMessage, true)
-        } else if (this.content !== undefined) {
-          Column() {
-            // P3-9-B：顶栏作为占位（非覆盖），正文在其下方。
-            // 回答/文章页信息头（标题/作者/时间）随正文滚动（对齐上游折叠顶栏），无固定信息条。
+        } else {
+          // 以内容身份为键走 ForEach：回答切换命中正文缓存时 LOADING→READY 在同一帧内完成，
+          // 加载态分支不会渲染，而 NativeContentDocument 的 html 与信息头/尾部 @BuilderParam
+          // 都是普通成员，复用实例不会随父组件更新，表现为顶栏作者已切换、正文仍是上一答。
+          // ForEach 必须直接挂在 build() 的状态树上（数据源引用 this.content），键变化才会
+          // 真正销毁重建正文；放进 if 分支的 @Builder 里则不会被 this.content 驱动。
+          ForEach(this.content === undefined ? [] : [this.content], (item: LoadedContentDetail): void => {
             Column() {
-              if (this.kind === ContentDetailKind.QUESTION) {
-                this.questionDocument(this.content)
-              } else {
-                this.loadedContent(this.content)
+              // P3-9-B：顶栏作为占位（非覆盖），正文在其下方。
+              // 回答/文章页信息头（标题/作者/时间）随正文滚动（对齐上游折叠顶栏），无固定信息条。
+              Column() {
+                if (this.kind === ContentDetailKind.QUESTION) {
+                  this.questionDocument(item)
+                } else {
+                  this.loadedContent(item)
+                }
               }
+              .layoutWeight(1)
+              .width('100%')
             }
-            .layoutWeight(1)
             .width('100%')
-          }
-          .width('100%')
-          .layoutWeight(1)
+            .layoutWeight(1)
+          }, (item: LoadedContentDetail): string =>
+            `${item.kind}_${item.value.id}_${item.loadGeneration}`)
         }
       }
       .id(`content_${this.kind}_detail_page`)
@@ -710,58 +749,68 @@ struct ContentDetailPage {
       .padding({ top: this.immersiveReading ? Math.max(this.statusBarHeightVp, 0) : 0 })
       .backgroundColor($r('app.color.page_background'))
 
-      // 整页级过滑预览：纵向模式固定在顶/底缘；横向模式按上游
-      // AnswerHorizontalOverscroll 将相邻回答放在左右整页之外，随拖动沿 X 轴露出。
+      // 整页级过滑预览：相邻回答整页放在视口之外，随拖动沿切换轴（横向 X / 纵向 Y）露出。
       // 仅展示层（hitTestMode None），切换判定仍在 loadedContent 的并行手势。
-      if (this.kind === ContentDetailKind.ANSWER && this.content !== undefined &&
-        this.phase === ContentDetailPhase.READY) {
-        if (this.answerSwitchMode === 'horizontal') {
-          if (this.answerOverscrollOffset > 0 && this.navigatorHasPrevious()) {
-            Stack({ alignContent: Alignment.Center }) {
-              this.horizontalAnswerPage(true)
-            }
-            .width('100%')
-            .height('100%')
-            .backgroundColor($r('app.color.page_background'))
-            .translate({ x: this.answerOverscrollOffset - this.answerViewportWidthVp })
-            .hitTestBehavior(HitTestMode.None)
+      // 提交过渡期间 LOADING 会把 content 清空，但冻结页只依赖切换快照与问题标题缓存，
+      // 仍要铺在屏上直到新正文到货——否则未命中缓存时会露出加载面板，标题也跟着消失。
+      if (this.kind === ContentDetailKind.ANSWER &&
+        (this.content !== undefined || this.answerSwitchTransition !== undefined) &&
+        (this.phase === ContentDetailPhase.READY || this.answerSwitchTransition !== undefined)) {
+        if (this.answerSwitchTransition !== undefined) {
+          // 提交过渡：冻结页始终铺在整页外侧，随剩余滑出动画滑入并最终覆盖全屏；
+          // 导航索引此时已前进，不能再按实时预览判断方向与内容。
+          Stack({ alignContent: Alignment.Center }) {
+            this.answerSwitchPage(this.answerSwitchTransition.previous)
           }
-          if (this.answerOverscrollOffset < 0 && this.navigatorHasNext()) {
-            Stack({ alignContent: Alignment.Center }) {
-              this.horizontalAnswerPage(false)
-            }
-            .width('100%')
-            .height('100%')
-            .backgroundColor($r('app.color.page_background'))
-            .translate({ x: this.answerOverscrollOffset + this.answerViewportWidthVp })
-            .hitTestBehavior(HitTestMode.None)
+          .width('100%')
+          .height('100%')
+          .backgroundColor($r('app.color.page_background'))
+          .translate(this.answerSwitchPageTranslate(this.answerOverscrollOffset -
+            (this.answerSwitchTransition.previous
+              ? this.answerSwitchExtentVp() : -this.answerSwitchExtentVp())))
+          // 过渡期间吞掉手势：主内容此时在屏外，不能让滑动落到待换下的正文上。
+          .hitTestBehavior(HitTestMode.Block)
+        } else if (this.answerOverscrollOffset > 0 && this.navigatorHasPrevious()) {
+          Stack({ alignContent: Alignment.Center }) {
+            this.answerSwitchPage(true)
           }
-        } else {
-          // 顶部"上一个回答"预览卡：固定整页顶端，状态栏下方（对齐上游 systemBars 顶边距）。
-          if (this.answerOverscrollOffset > 0 && this.navigatorHasPrevious()) {
-            Stack({ alignContent: Alignment.Top }) {
-              this.answerPreviewCard(true)
-            }
-            .width('100%')
-            .height('100%')
-            .hitTestBehavior(HitTestMode.None)
+          .width('100%')
+          .height('100%')
+          .backgroundColor($r('app.color.page_background'))
+          .translate(this.answerSwitchPageTranslate(this.answerOverscrollOffset - this.answerSwitchExtentVp()))
+          .hitTestBehavior(HitTestMode.None)
+        } else if (this.answerOverscrollOffset < 0 && this.navigatorHasNext()) {
+          Stack({ alignContent: Alignment.Center }) {
+            this.answerSwitchPage(false)
           }
-          // 底部"下一个回答"预览卡：固定整页底端，导航条上方 8vp。
-          if (this.answerOverscrollOffset < 0 && this.navigatorHasNext()) {
-            Stack({ alignContent: Alignment.Bottom }) {
-              this.answerPreviewCard(false)
-            }
-            .width('100%')
-            .height('100%')
-            .hitTestBehavior(HitTestMode.None)
-          }
+          .width('100%')
+          .height('100%')
+          .backgroundColor($r('app.color.page_background'))
+          .translate(this.answerSwitchPageTranslate(this.answerOverscrollOffset + this.answerSwitchExtentVp()))
+          .hitTestBehavior(HitTestMode.None)
         }
+      }
+
+      // 底部操作栏点击屏蔽层：操作栏悬浮在正文之上且必须放任正文滚动/点击穿透（Transparent），
+      // 但触点落在栏内时不能再传给下方正文——否则点「更多」的同时会命中栏下图片并打开大图。
+      // 仅在栏实际覆盖的矩形上屏蔽，正文其余区域不受影响。
+      if (!this.immersiveReading && (!this.autoHideArticleBottomBar || !this.chromeHiddenByScroll) &&
+        this.content !== undefined &&
+        this.phase === ContentDetailPhase.READY &&
+        this.bottomActionBarHeightVp > 0 && this.answerViewportHeightVp > 0) {
+        Stack()
+          .width('100%')
+          .height(this.bottomActionBarHeightVp)
+          .position({
+            x: 0,
+            y: Math.max(0, this.answerViewportHeightVp - this.bottomActionBarHeightVp)
+          })
+          .hitTestBehavior(HitTestMode.Block)
       }
 
       // 底部操作栏：全屏悬浮层单实例承载（正文从下方穿透直至物理底边）。
       // 切勿在布局流内再渲染第二份——两份会完全重叠绘制（06a2ab90 修复的错乱根源）。
-      // 回答页过滑时随主内容一起平移（上游 bottomBar 在 MainContent 内随内容滑走）。
-      // 纵向模式沿用渐隐让位预览卡；横向模式必须保持完整不透明，才能与正文、问题栏组成整页平铺。
+      // 回答页过滑时随主内容一起平移（与正文、相邻回答整页组成同轴平移）。
       if (!this.immersiveReading && (!this.autoHideArticleBottomBar || !this.chromeHiddenByScroll) &&
         this.content !== undefined &&
         this.phase === ContentDetailPhase.READY) {
@@ -770,10 +819,7 @@ struct ContentDetailPage {
         }
         .width('100%')
         .height('100%')
-        .opacity(this.kind === ContentDetailKind.ANSWER && this.answerSwitchMode !== 'horizontal'
-          ? Math.max(0, 1 - this.answerOverscrollProgress()) : 1)
-        .hitTestBehavior(this.kind === ContentDetailKind.ANSWER &&
-          (this.answerOverscrollOffset !== 0 || this.answerOverscrollProgress() >= 1)
+        .hitTestBehavior(this.kind === ContentDetailKind.ANSWER && this.answerOverscrollOffset !== 0
           ? HitTestMode.None : HitTestMode.Transparent)
         .translate({
           x: this.answerSwitchMode === 'horizontal' ? this.answerOverscrollOffset : 0,
@@ -871,8 +917,12 @@ struct ContentDetailPage {
     .clip(true)
     .onAreaChange((_oldArea: Area, newArea: Area): void => {
       const width = Number(newArea.width);
+      const height = Number(newArea.height);
       if (width > 0 && Math.abs(width - this.answerViewportWidthVp) > 1) {
         this.answerViewportWidthVp = width;
+      }
+      if (height > 0 && Math.abs(height - this.answerViewportHeightVp) > 1) {
+        this.answerViewportHeightVp = height;
       }
     })
   }
@@ -921,6 +971,47 @@ struct ContentDetailPage {
           collections.some((collection: CollectionSummary): boolean => collection.isFavorited);
       })
       .catch((_error: Object): void => {
+      });
+  }
+
+  /**
+   * 拉取回答尾部的热评预览（热度排序的根评论首页，取前几条）。
+   * 只对回答详情生效；游客态或未装配评论仓库时静默清空，不影响正文。
+   * 同一回答不重复请求（切换回答由 answerId 变化触发，回包按 answerId 校验）。
+   */
+  private refreshHotComments(content: LoadedContentDetail): void {
+    if (content.kind !== ContentDetailKind.ANSWER || !this.showHotComments) {
+      this.hotComments = [];
+      this.hotCommentsLoading = false;
+      this.hotCommentsAnswerId = '';
+      return;
+    }
+    const answerId = content.value.id;
+    if (answerId === this.hotCommentsAnswerId) {
+      return;
+    }
+    this.hotCommentsAnswerId = answerId;
+    this.hotComments = [];
+    const repository = this.commentRepository;
+    if (repository === undefined) {
+      this.hotCommentsLoading = false;
+      return;
+    }
+    this.hotCommentsLoading = true;
+    repository.getRootCommentsPage(CommentContentKind.ANSWER, answerId, CommentSortOrder.SCORE)
+      .then((page: CommentPage): void => {
+        if (this.hotCommentsAnswerId !== answerId) {
+          return;
+        }
+        this.hotComments = hotCommentPreview(page.items, HOT_COMMENT_PREVIEW_LIMIT);
+        this.hotCommentsLoading = false;
+      })
+      .catch((_error: Error): void => {
+        if (this.hotCommentsAnswerId !== answerId) {
+          return;
+        }
+        this.hotComments = [];
+        this.hotCommentsLoading = false;
       });
   }
 
@@ -992,7 +1083,9 @@ struct ContentDetailPage {
           // 此回调与下方父容器手势共同覆盖整个正文区域，onContentDoubleTap 内部幂等。
           onBodyDoubleTap: (): void => this.onContentDoubleTap(),
           documentHeader: (): void => { this.contentHeader(content) },
-          documentFooter: (): void => { this.contentDateFooter(content) },
+          // 回答/文章日期紧接正文（不得与热评同处一个 ListItem：多子组件会被热评卡片覆盖）。
+          documentBodyFooter: (): void => { this.contentDateFooter(content) },
+          documentFooter: (): void => { this.answerFooter(content) },
           onScrollOffset: (offset: number): void => {
             // 按正文实例过滤旧 List 的残余事件；新正文 READY 时可能仍在写阅读记录，
             // 不能用 navigatorBusy 丢弃其初始滚动/边界通知。
@@ -1046,6 +1139,10 @@ struct ContentDetailPage {
         ? PanDirection.Horizontal : PanDirection.Vertical })
         .onActionStart((event: GestureEvent): void => {
           this.overscrollPanPrevY = this.answerSwitchMode === 'horizontal' ? event.offsetX : event.offsetY;
+          // 横向模式下起手即预取下一答正文：抬手切换时多半已命中缓存，不必整页转圈。
+          if (this.answerSwitchMode === 'horizontal') {
+            this.prefetchNeighborAnswer(false);
+          }
         })
         .onActionUpdate((event: GestureEvent): void => {
           this.onAnswerOverscrollPanUpdate(event);
@@ -1070,27 +1167,42 @@ struct ContentDetailPage {
     )
   }
 
-  /** 横向相邻回答整页（对齐上游 CachedAnswerPreview）。
+  /** 相邻回答整页（对齐上游 CachedAnswerPreview，纵向/横向共用）。
    * 顶栏、正文信息头和底部操作栏必须与松手后真正加载的回答页共用同一几何口径，
-   * 否则拖动途中会看到问题标题/作者和底栏在切换完成的一瞬间发生纵向跳变。 */
+   * 否则拖动途中会看到问题标题/作者和底栏在切换完成的一瞬间发生跳变。 */
   @Builder
-  private horizontalAnswerPage(previous: boolean) {
+  private answerSwitchPage(previous: boolean) {
     Stack({ alignContent: Alignment.TopStart }) {
       Column() {
-        // 最终页面顶部由 HDS AnswerTitleBar 占据 64vp 槽位，未滚动时显示“回答”；
-        // 问题标题属于其下方的正文信息头，不能提前塞进顶栏槽位。
-        this.horizontalAnswerTitleBar()
+        // 切换过程中 HDS 顶栏保持不动，预览页不再自带第二套标题栏，仅保留等高占位；
+        // 顶部标题区域内的内容由悬浮顶栏承载，避免与静止的顶栏重叠。
+        Column()
+          .width('100%')
+          .height(FLOATING_TITLE_BAR_OFFSET)
 
         Column({ space: $r('app.float.spacing_small') }) {
-          Text(this.currentAnswerQuestionTitle())
-            .id(previous ? 'answer_prev_horizontal_question' : 'answer_next_horizontal_question')
-            .fontSize($r('app.float.reader_title_font_size'))
-            .lineHeight($r('app.float.reader_title_line_height'))
-            .fontWeight(FontWeight.Bold)
-            .fontColor($r('app.color.primary_text'))
-            .width('100%')
-            // 与正式页一致：外层 10vp 间距 + 8vp，标题到作者共 18vp。
-            .margin({ bottom: 8 })
+          // 问题标题整题内不变：预览页与正式页同字号同间距直接渲染同一标题
+          //（取自缓存，不受新回答加载影响），滑动途中不会出现"标题空白 → 出现"；
+          // 标题随整页一起滑动，不做任何固定/反向位移。
+          // 开启"问题标题集成到顶栏"后正式页标题在静止顶栏里，预览页也不再占位/重绘。
+          if (!this.questionInTitleBar && this.answerQuestionTitleSnapshot.length > 0) {
+            if (this.answerSwitchMode === 'vertical') {
+              // 纵向切换时当前页的问题标题还随正文在屏上滑动，再画一份会出现"两个标题"；
+              // 这里只占位（高度取正式页实测标题高），保证落地瞬间信息头几何与正式页一致。
+              Column()
+                .width('100%')
+                .height(this.answerPreviewTitleHeightVp())
+                .margin({ bottom: 8 })
+            } else {
+              Text(this.answerQuestionTitleSnapshot)
+                .fontSize($r('app.float.heading_font_size'))
+                .lineHeight(28)
+                .fontWeight(FontWeight.Bold)
+                .fontColor($r('app.color.primary_text'))
+                .width('100%')
+                .margin({ bottom: 8 })
+            }
+          }
 
           Row({ space: $r('app.float.spacing_small') }) {
             Stack({ alignContent: Alignment.Center }) {
@@ -1158,40 +1270,29 @@ struct ContentDetailPage {
           right: readerHorizontalPaddingVp(this.answerViewportWidthVp),
           top: $r('app.float.spacing_medium')
         })
-        .clip(true)
       }
       .width('100%')
       .height('100%')
 
       // 最终页底栏是覆盖正文的悬浮层，不参与正文 Column 的高度分配；预览保持相同。
       Stack({ alignContent: Alignment.Bottom }) {
-        this.horizontalAnswerBottomBar(previous)
+        this.answerSwitchBottomBar(previous)
       }
       .width('100%')
       .height('100%')
       .hitTestBehavior(HitTestMode.None)
     }
-    .id(previous ? 'answer_prev_horizontal_page' : 'answer_next_horizontal_page')
+    .id(previous ? 'answer_prev_switch_page' : 'answer_next_switch_page')
     .width('100%')
     .height('100%')
+    // 预览页整体在视口外，裁到本页边界，未滑入的部分不参与绘制。
+    .clip(true)
     .backgroundColor($r('app.color.page_background'))
-  }
-
-  /** 与标准页同一份 AnswerTitleBar（answerId 置空恒为未折叠"回答"态）：预览模式下
-   * 组件自身不随过滑平移/淡出，整体在 64vp 顶栏槽位内居中，几何与 AppShell 顶栏一致。 */
-  @Builder
-  private horizontalAnswerTitleBar() {
-    Column() {
-      AnswerTitleBar({ answerId: '', previewMode: true })
-    }
-    .width('100%')
-    .height(FLOATING_TITLE_BAR_OFFSET)
-    .justifyContent(FlexAlign.Center)
   }
 
   /** 与 bottomActionBar 相同的左右双胶囊预览；只展示相邻回答数据，不承载点击行为。 */
   @Builder
-  private horizontalAnswerBottomBar(previous: boolean) {
+  private answerSwitchBottomBar(previous: boolean) {
     Column() {
       Row({ space: $r('app.float.spacing_small') }) {
         GlassCapsule({ useMaterial: this.immersiveMaterialSupported }) {
@@ -1259,104 +1360,6 @@ struct ContentDetailPage {
     .hitTestBehavior(HitTestMode.None)
   }
 
-  /** 纵向过滑预览卡（对齐上游 AnswerPreviewCard）：上一答卡标签行在上、作者行在下；
-   * 下一答卡 reverseLayout：作者行在上、标签行在下。 */
-  @Builder
-  private answerPreviewCard(previous: boolean) {
-    Column({ space: 8 }) {
-      if (previous) {
-        this.answerPreviewLabelRow(previous)
-        this.answerPreviewAuthorRow(previous)
-      } else {
-        this.answerPreviewAuthorRow(previous)
-        this.answerPreviewLabelRow(previous)
-      }
-    }
-    .id(previous ? 'answer_prev_preview_card' : 'answer_next_preview_card')
-    .width('100%')
-    .padding(12)
-    .borderRadius($r('app.float.card_radius'))
-    .margin({
-      left: $r('app.float.page_padding'),
-      right: $r('app.float.page_padding'),
-      // 上一答卡固定整页顶端、状态栏下方（对齐上游 systemBars 顶边距）；
-      // 下一答卡固定整页底端、导航条上方 8vp（对齐上游 systemBars 底边距 + 8dp）。
-      top: previous ? Math.max(this.statusBarHeightVp, 0) : 0,
-      bottom: previous ? 0 : 8 + Math.max(this.bottomRectHeightVp, 0)
-    })
-    .backgroundColor(this.answerOverscrollTriggered()
-      ? themeColorContainerColor(this.resolvedThemeColor) : $r('app.color.surface_background'))
-    .opacity(this.answerOverscrollProgress())
-  }
-
-  /** 预览卡标签行：方向图标 + 文案（触发后高亮为"松手切换"）。 */
-  @Builder
-  private answerPreviewLabelRow(previous: boolean) {
-    Row({ space: 6 }) {
-      SymbolGlyph(previous ? $r('sys.symbol.arrow_up') : $r('sys.symbol.arrow_down'))
-        .fontSize(16)
-        .fontColor([this.answerOverscrollTriggered()
-          ? this.resolvedThemeColor : $r('app.color.secondary_text')])
-      Text(this.answerOverscrollTriggered() ? '松手切换' : (previous ? '上一个回答' : '下一个回答'))
-        .fontSize($r('app.float.caption_font_size'))
-        .fontWeight(this.answerOverscrollTriggered() ? FontWeight.Bold : FontWeight.Normal)
-        .fontColor(this.answerOverscrollTriggered()
-          ? this.resolvedThemeColor : $r('app.color.secondary_text'))
-    }
-    .width('100%')
-  }
-
-  /** 预览卡作者行：头像 + 姓名/摘要。 */
-  @Builder
-  private answerPreviewAuthorRow(previous: boolean) {
-    Row({ space: 8 }) {
-      Stack({ alignContent: Alignment.Center }) {
-        Circle()
-          .width(28)
-          .height(28)
-          .fill($r('app.color.control_background'))
-        if (this.answerPreviewAvatarUrl(previous).length > 0) {
-          Image(this.answerPreviewAvatarUrl(previous))
-            .id(previous ? 'answer_prev_preview_avatar' : 'answer_next_preview_avatar')
-            .width(28)
-            .height(28)
-            .borderRadius(14)
-            .objectFit(ImageFit.Cover)
-        } else if (this.answerPreviewAuthorName(previous).length > 0) {
-          Text(this.answerPreviewAuthorName(previous).substring(0, 1))
-            .fontSize($r('app.float.caption_font_size'))
-            .fontColor($r('app.color.secondary_text'))
-        }
-      }
-      .width(28)
-      .height(28)
-      .clip(true)
-
-      Column({ space: 2 }) {
-        if (this.answerPreviewAuthorName(previous).length > 0) {
-          Text(this.answerPreviewAuthorName(previous))
-            .id(previous ? 'answer_prev_preview_author' : 'answer_next_preview_author')
-            .fontSize($r('app.float.body_font_size'))
-            .fontWeight(FontWeight.Medium)
-            .fontColor($r('app.color.primary_text'))
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-        }
-        if (this.answerPreviewExcerpt(previous).length > 0) {
-          Text(this.answerPreviewExcerpt(previous))
-            .id(previous ? 'answer_prev_preview_excerpt' : 'answer_next_preview_excerpt')
-            .fontSize($r('app.float.caption_font_size'))
-            .fontColor($r('app.color.secondary_text'))
-            .maxLines(2)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-        }
-      }
-      .layoutWeight(1)
-      .alignItems(HorizontalAlign.Start)
-    }
-    .width('100%')
-  }
-
   /** 悬浮"下一个回答"按钮：品牌色圆形 + 系统"下一曲"图标（对齐上游 SkipNext FAB），
    * 点击切换下一答；透明度受"外观与阅读体验→悬浮按钮透明度"控制，可拖动避让正文。 */
   @Builder
@@ -1415,7 +1418,8 @@ struct ContentDetailPage {
         })
     )
     .onClick((): void => {
-      void this.moveAnswer(1);
+      // 按钮切换与滑动手势共用同一套整页翻页过渡。
+      void this.commitAnswerSwitch(false);
     })
   }
 
@@ -1617,14 +1621,18 @@ struct ContentDetailPage {
       this.immersiveAuthorRow(content)
     } else {
       Column({ space: $r('app.float.spacing_small') }) {
-        // 主标题保留在正文信息头：回答显示所属问题，文章显示文章标题，避免仅依赖通用路由标题。
-        if (contentContextTitle(content).length > 0) {
+        // 主标题保留在正文信息头：回答页显示问题标题（随正文滚动、完整不截断），
+        // 问题页显示问题标题，文章页显示文章标题，避免仅依赖通用路由标题。
+        // 回答页开启"问题标题集成到顶栏"后标题改由 HDS 顶栏常驻，这里不再重复；
+        // 未开启时标题可点击进入问题页（与顶栏折叠态标题一致）。
+        if (contentContextTitle(content).length > 0 &&
+          !(content.kind === ContentDetailKind.ANSWER && this.questionInTitleBar)) {
           Text(contentContextTitle(content))
             .id(`${content.kind}_detail_context_title`)
-            .fontSize(content.kind === ContentDetailKind.QUESTION
-              ? $r('app.float.heading_font_size') : $r('app.float.reader_title_font_size'))
-            .lineHeight(content.kind === ContentDetailKind.QUESTION
-              ? 28 : $r('app.float.reader_title_line_height'))
+            .fontSize(content.kind === ContentDetailKind.ARTICLE
+              ? $r('app.float.reader_title_font_size') : $r('app.float.heading_font_size'))
+            .lineHeight(content.kind === ContentDetailKind.ARTICLE
+              ? $r('app.float.reader_title_line_height') : 28)
             .fontWeight(FontWeight.Bold)
             .fontColor($r('app.color.primary_text'))
             .copyOption(CopyOptions.LocalDevice)
@@ -1638,9 +1646,8 @@ struct ContentDetailPage {
                 this.contentTitleHeightVp = height;
               }
             })
-            .accessibilityDescription(content.kind === ContentDetailKind.ANSWER ? '点击查看问题详情' : '')
             .onClick((): void => {
-              if (content.kind === ContentDetailKind.ANSWER) {
+              if (content.kind === ContentDetailKind.ANSWER && content.value.questionId.length > 0) {
                 this.navigate({ name: AppDestinationName.QUESTION, id: content.value.questionId });
               }
             })
@@ -1778,6 +1785,25 @@ struct ContentDetailPage {
     }
   }
 
+  /**
+   * 正文页脚：回答页显示「热门评论」预览（日期已前移到正文页脚，避免与热评同层互相覆盖）。
+   * 热评只对回答生效；无评论时保留卡片显示空态，不再加载完成后整体消失。
+   */
+  @Builder
+  private answerFooter(content: LoadedContentDetail) {
+    if (content.kind === ContentDetailKind.ANSWER && this.showHotComments) {
+      HotCommentSection({
+        comments: this.hotComments,
+        totalCount: contentCommentCount(content),
+        loading: this.hotCommentsLoading,
+        onOpenAll: (): void => this.openComments(),
+        onImagePreview: (url: string): void => {
+          AppStorage.setOrCreate('imagePreviewUrl', url);
+        }
+      })
+    }
+  }
+
   /** 沉浸式窄作者行（对齐上游 isImmersiveMode 分支）：24vp 头像 + 名称，点击进作者主页。 */
   @Builder
   private immersiveAuthorRow(content: LoadedContentDetail) {
@@ -1897,7 +1923,17 @@ struct ContentDetailPage {
     }
   }
 
-  /** 回答页顶栏折叠联动：正文滚过问题标题（高度经 onAreaChange 实测，未测得前用 64vp 兜底）
+  /** 回答页顶栏折叠阈值：正文滚过信息头里的问题标题（高度经 onAreaChange 实测，未测得前按 64vp 兜底）。
+   * 开启"问题标题集成到顶栏"后信息头已无标题，正文从首屏起就在顶栏下方，
+   * 稍微滚动即折叠为单行 + 答主并出磨砂带，避免两行标题与滚到其下的正文压字。 */
+  private answerCollapseThresholdVp(): number {
+    if (this.questionInTitleBar) {
+      return 2;
+    }
+    return this.contentTitleHeightVp > 0 ? this.contentTitleHeightVp + 8 : 64;
+  }
+
+  /** 回答页顶栏折叠联动：正文滚过信息头标题（高度经 onAreaChange 实测，未测得前用 64vp 兜底）
    * 即折叠，滚回复原；经 AppStorage 广播给 HDS 标题栏（同问题页 160px 阈值模式）。
    * 通道键固定用路由 contentId（标题栏按 destination.id 查找，过滑切换回答不改路由，
    * activeContentId 会随切换漂移导致顶栏读到陈旧条目）；闭包捕获的 content 是构造时
@@ -1907,13 +1943,14 @@ struct ContentDetailPage {
     if (content.kind !== ContentDetailKind.ANSWER || content.value.id !== this.content?.value.id) {
       return;
     }
-    const threshold = this.contentTitleHeightVp > 0 ? this.contentTitleHeightVp + 8 : 64;
+    const threshold = this.answerCollapseThresholdVp();
     const scrolled = offset > threshold;
     if (scrolled !== this.answerQuestionScrolled) {
       this.answerQuestionScrolled = scrolled;
       this.getUIContext().animateTo({ duration: 220, curve: Curve.EaseInOut }, (): void => {
         publishAnswerTitle({
           id: this.contentId,
+          questionId: content.value.questionId,
           questionTitle: contentContextTitle(content),
           authorName: contentAuthorName(content),
           authorAvatarUrl: contentAuthorAvatarUrl(content),
@@ -2703,33 +2740,145 @@ struct ContentDetailPage {
     this.navigatorBusy = true;
     this.resetAnswerOverscroll(false);
     try {
-      const id = await this.answerNavigator?.move(direction);
-      this.navigatorRevision += 1;
-      if (!this.pageActive) { return; }
-      if (id === undefined) {
-        const message = this.answerNavigator?.errorMessage() ?? '';
-        this.getUIContext().getPromptAction()
-          .showToast({ message: message.length > 0 ? message : '暂时无法切换回答' });
-        return;
-      }
-      // 取得目标后再复位，紧接着 load 卸载旧正文；分页等待/切换失败不破坏当前边界。
-      // 新内容从顶部渲染：边界状态归位，避免沿用上一答的贴底状态误触发底部过滑。
-      this.contentAtBottom = false;
-      this.contentAtTop = true;
-      // 顶栏折叠态随新答复位：新内容从顶部渲染，问题标题回到视口内。
-      this.answerQuestionScrolled = false;
-      // 折叠的标题栏/底部操作栏随新答复位回显（对齐上游：切回答 = 新建 ScrollState，
-      // currentScroll == 0 时 offset.snapTo(0) 强制回显；本页组件复用 @State，需手动复位）。
-      this.chromeHiddenByScroll = false;
-      this.lastContentScrollOffset = 0;
-      AppStorage.setOrCreate('detailTitleHiddenByScroll', false);
-      this.voteController?.deactivate();
-      this.voteController = undefined;
-      this.favoriteDialogShown = false;
-      this.contentFavorited = false;
-      this.activeContentId = id;
-      await this.controller?.load(ContentDetailKind.ANSWER, id);
+      await this.applyAnswerMove(direction);
     } finally { this.navigatorBusy = false; }
+  }
+
+  /** 执行相邻回答导航与正文加载（调用方负责 navigatorBusy 与过滑复位）；返回是否成功切到目标回答。 */
+  private async applyAnswerMove(direction: number): Promise<boolean> {
+    const preview = direction < 0
+      ? this.answerNavigator?.previousAnswerPreview()
+      : this.answerNavigator?.nextAnswerPreview();
+    const id = await this.answerNavigator?.move(direction);
+    this.navigatorRevision += 1;
+    if (!this.pageActive) { return false; }
+    if (id === undefined) {
+      const message = this.answerNavigator?.errorMessage() ?? '';
+      this.getUIContext().getPromptAction()
+        .showToast({ message: message.length > 0 ? message : '暂时无法切换回答' });
+      return false;
+    }
+    // 取得目标后再复位，紧接着 load 卸载旧正文；分页等待/切换失败不破坏当前边界。
+    // 新内容从顶部渲染：边界状态归位，避免沿用上一答的贴底状态误触发底部过滑。
+    this.contentAtBottom = false;
+    this.contentAtTop = true;
+    // 顶栏折叠态随新答复位：新内容从顶部渲染，问题标题回到视口内。
+    this.answerQuestionScrolled = false;
+    // 折叠的标题栏/底部操作栏随新答复位回显（对齐上游：切回答 = 新建 ScrollState，
+    // currentScroll == 0 时 offset.snapTo(0) 强制回显；本页组件复用 @State，需手动复位）。
+    this.chromeHiddenByScroll = false;
+    this.lastContentScrollOffset = 0;
+    AppStorage.setOrCreate('detailTitleHiddenByScroll', false);
+    this.voteController?.deactivate();
+    this.voteController = undefined;
+    this.favoriteDialogShown = false;
+    this.contentFavorited = false;
+    this.activeContentId = id;
+    this.publishPreviewAnswerTitle(id, preview);
+    // preferAnswerCache=true：滑动手势/停留时已预取正文，命中缓存即直接渲染，
+    // 不再整页转圈；未命中时仓库内部复用同一在飞请求，不会重复下载。
+    await this.controller?.load(ContentDetailKind.ANSWER, id, true);
+    return true;
+  }
+
+  /** 过滑提交：先把当前页沿拖动方向整页滑出（相邻页顺势铺满），再切换回答，
+   * 正文就绪后在同一位置落地，不再松手瞬间"瞬移换页"。
+   * 命中正文缓存时整段过渡约 200ms；未命中时冻结页停留到正文加载完成。 */
+  private async commitAnswerSwitch(previous: boolean): Promise<void> {
+    if (this.navigatorBusy) { return; }
+    const extent = this.answerSwitchExtentVp();
+    const sign = previous ? 1 : -1;
+    this.navigatorBusy = true;
+    this.answerSwitchTransition = { previous: previous, preview: this.answerPreviewData(previous) };
+    this.overscrollRawDrag = 0;
+    this.prefetchNeighborAnswer(previous);
+    let moved = false;
+    try {
+      await this.animateOverscrollTo(sign * extent);
+      if (this.pageActive) {
+        moved = await this.applyAnswerMove(previous ? -1 : 1);
+      }
+      if (!moved) {
+        // 切换失败/页面失活：让当前页滑回原位，冻结页随之退出。
+        await this.animateOverscrollTo(0);
+      }
+    } finally {
+      this.applyOverscrollOffset(0);
+      this.answerSwitchTransition = undefined;
+      this.navigatorBusy = false;
+    }
+  }
+
+  /** 整页切换的视口跨度：横向取宽度、纵向取高度；未测得时兜底，避免过渡退化为原地换页。 */
+  private answerSwitchExtentVp(): number {
+    if (this.answerSwitchMode === 'horizontal') {
+      return this.answerViewportWidthVp > 0 ? this.answerViewportWidthVp : 360;
+    }
+    return this.answerViewportHeightVp > 0 ? this.answerViewportHeightVp : 800;
+  }
+
+  /** 整页预览/冻结页沿切换轴的位移（横向 X、纵向 Y）。 */
+  private answerSwitchPageTranslate(delta: number): TranslateOptions {
+    return this.answerSwitchMode === 'horizontal' ? { x: delta, y: 0 } : { x: 0, y: delta };
+  }
+
+  /** 预览页问题标题占位高度（vp）：纵向切换不画标题，用正式页实测高度占位；
+   * 未测得时按两行（56vp）兜底，避免落地瞬间信息头高度跳变。 */
+  private answerPreviewTitleHeightVp(): number {
+    return this.contentTitleHeightVp > 0 ? this.contentTitleHeightVp : 56;
+  }
+
+  /** 过滑偏移动画。UIContext.animateTo 无完成回调，按动画时长兜底结算，
+   * 页面销毁/动画被打断时也不会挂住切换流程。 */
+  private animateOverscrollTo(target: number): Promise<void> {
+    return new Promise<void>((resolve: () => void): void => {
+      this.getUIContext().animateTo({
+        duration: ANSWER_SWITCH_SLIDE_DURATION,
+        curve: Curve.FastOutSlowIn
+      }, (): void => {
+        this.applyOverscrollOffset(target);
+      });
+      setTimeout((): void => {
+        resolve();
+      }, ANSWER_SWITCH_SLIDE_DURATION + 20);
+    });
+  }
+
+  /** 切换瞬间先用相邻回答预览回填标题栏，避免新正文出来前仍挂着上一条回答的标题。 */
+  private publishPreviewAnswerTitle(id: string, preview: AnswerNavigationPreview | undefined): void {
+    const current = this.content;
+    if (preview === undefined || preview.answerId !== id || current === undefined ||
+      current.kind !== ContentDetailKind.ANSWER) {
+      return;
+    }
+    publishAnswerTitle({
+      id: id,
+      questionId: current.value.questionId,
+      questionTitle: contentContextTitle(current),
+      authorName: preview.authorName,
+      authorAvatarUrl: preview.authorAvatarUrl,
+      authorBadgeIconUrl: '',
+      scrolled: false
+    });
+  }
+
+  /**
+   * 预取相邻回答正文（只填充仓库缓存，失败静默）。
+   * 预取与切换都走 preferCache=true：命中缓存直接返回，未命中才请求，
+   * 重复触发由仓库的在飞请求表复用，不会叠加下载。
+   */
+  private prefetchNeighborAnswer(previous: boolean): void {
+    if (this.kind !== ContentDetailKind.ANSWER) { return; }
+    const repository = this.repository;
+    if (repository === undefined) { return; }
+    const preview = previous
+      ? this.answerNavigator?.previousAnswerPreview()
+      : this.answerNavigator?.nextAnswerPreview();
+    const id = preview?.answerId ?? '';
+    if (id.length === 0) { return; }
+    repository.getAnswer(id, true).catch((_error: Error): void => {
+      // 预取失败不打扰用户：切过去时仍会走常规加载并给出错误态。
+    });
   }
 
   /** 按 tanh 阻尼转为过滑偏移：横向模式不依赖正文纵向边界，纵向模式仍要求贴顶/贴底。 */
@@ -2751,6 +2900,10 @@ struct ContentDetailPage {
       this.answerOverscrollOffset, delta, this.contentAtTop, this.contentAtBottom,
       this.navigatorHasPrevious(), this.navigatorHasNext());
     if (nextRawDrag === this.overscrollRawDrag) { return; }
+    // 拖动方向确定后补预取对应相邻回答（纵向模式下也只有真正过滑才触发）。
+    if (this.overscrollRawDrag === 0 && nextRawDrag !== 0) {
+      this.prefetchNeighborAnswer(delta > 0);
+    }
     this.overscrollRawDrag = nextRawDrag;
     this.applyOverscrollOffset(dampedOverscrollOffset(this.overscrollRawDrag,
       this.answerSwitchMode === 'horizontal' ? ANSWER_HORIZONTAL_OVERSCROLL_MAX_OFFSET : ANSWER_OVERSCROLL_MAX_OFFSET,
@@ -2775,8 +2928,8 @@ struct ContentDetailPage {
       (previous ? this.navigatorHasPrevious() : this.navigatorHasNext());
     this.overscrollRawDrag = 0;
     if (triggered) {
-      this.resetAnswerOverscroll(false);
-      void this.moveAnswer(previous ? -1 : 1);
+      // 不瞬移归零：先把剩余行程滑完再换页（见 commitAnswerSwitch）。
+      void this.commitAnswerSwitch(previous);
       return;
     }
     this.getUIContext().animateTo({ curve: curves.springMotion(0.32, 0.78) }, (): void => {
@@ -2784,10 +2937,11 @@ struct ContentDetailPage {
     });
   }
 
-  /** 过滑手势被系统中断：不判定阈值、不触发切换，直接弹簧回位并清零原始拖动量。 */
+  /** 过滑手势被系统中断：不判定阈值、不触发切换，直接弹簧回位并清零原始拖动量。
+   * 提交过渡中的偏移由过渡流程自己收尾，不能在这里打断。 */
   private cancelAnswerOverscrollPan(): void {
     this.overscrollRawDrag = 0;
-    if (this.answerOverscrollOffset === 0) { return; }
+    if (this.answerSwitchTransition !== undefined || this.answerOverscrollOffset === 0) { return; }
     this.getUIContext().animateTo({ curve: curves.springMotion(0.32, 0.78) }, (): void => {
       this.applyOverscrollOffset(0);
     });
@@ -2811,19 +2965,18 @@ struct ContentDetailPage {
       Math.min(3, Math.max(0.5, this.answerSwitchSensitivity));
   }
 
-  private answerOverscrollProgress(): number {
-    const threshold = this.answerOverscrollTriggerThreshold() /
-      Math.min(3, Math.max(0.5, this.answerSwitchSensitivity));
-    return Math.min(1, Math.abs(this.answerOverscrollOffset) / threshold);
-  }
-
   private answerOverscrollTriggerThreshold(): number {
     return this.answerSwitchMode === 'horizontal'
       ? ANSWER_HORIZONTAL_TRIGGER_THRESHOLD : ANSWER_OVERSCROLL_TRIGGER_THRESHOLD;
   }
 
-  /** 过滑方向对应的预览数据：previous=true 取上一答，否则取下一答。 */
+  /** 过滑方向对应的预览数据：previous=true 取上一答，否则取下一答。
+   * 提交过渡期间返回释放瞬间的快照（导航索引已前进，实时数据会指向另一条回答）。 */
   private answerPreviewData(previous: boolean): AnswerNavigationPreview | undefined {
+    const transition = this.answerSwitchTransition;
+    if (transition !== undefined && transition.previous === previous) {
+      return transition.preview;
+    }
     return previous ? this.answerNavigator?.previousAnswerPreview() : this.answerNavigator?.nextAnswerPreview();
   }
 
@@ -2851,12 +3004,6 @@ struct ContentDetailPage {
 
   private answerPreviewCommentCount(previous: boolean): number {
     return this.answerPreviewData(previous)?.commentCount ?? 0;
-  }
-
-  private currentAnswerQuestionTitle(): string {
-    const content = this.content;
-    return content !== undefined && content.kind === ContentDetailKind.ANSWER
-      ? contentContextTitle(content) : '';
   }
 
   private canEditExistingAnswer(): boolean {
@@ -3395,14 +3542,20 @@ struct ContentDetailPage {
     this.openedRecordPhase = state.openedRecordPhase;
     if (state.phase === ContentDetailPhase.READY && state.content !== undefined) {
       this.refreshContentFavoriteState();
+      this.refreshHotComments(state.content);
       this.activateInteraction(state.content);
       if (state.content.kind === ContentDetailKind.QUESTION) {
         publishQuestionTitle({ id: this.activeContentId, title: state.content.value.title, scrolled: this.questionScrolled });
       }
       if (state.content.kind === ContentDetailKind.ANSWER) {
+        const questionTitle = contentContextTitle(state.content);
+        if (questionTitle.length > 0) {
+          this.answerQuestionTitleSnapshot = questionTitle;
+        }
         publishAnswerTitle({
           id: this.contentId,
-          questionTitle: contentContextTitle(state.content),
+          questionId: state.content.value.questionId,
+          questionTitle: questionTitle,
           authorName: contentAuthorName(state.content),
           authorAvatarUrl: contentAuthorAvatarUrl(state.content),
           authorBadgeIconUrl: contentAuthorBadge(state.content)?.iconUrl ?? '',
@@ -3422,6 +3575,10 @@ struct ContentDetailPage {
       if (state.content.kind === ContentDetailKind.ANSWER && this.answerNavigator === undefined) {
         this.ensureAnswerNavigator(state.content.value.questionId);
       }
+      // 正文就绪后顺手预取下一答：用户停留期间后台拉完，第一次左右滑即可直接渲染。
+      if (state.content.kind === ContentDetailKind.ANSWER) {
+        this.prefetchNeighborAnswer(false);
+      }
     }
   }
 
@@ -3430,7 +3587,11 @@ struct ContentDetailPage {
     const repository = this.questionAnswerFeedFactory();
     if (repository === undefined) { return; }
     this.answerNavigator = new QuestionAnswerNavigator(questionId, this.activeContentId, undefined, repository,
-      (): void => { this.navigatorRevision += 1; });
+      (): void => {
+        this.navigatorRevision += 1;
+        // 回答列表分页到货后才拿得到相邻回答 id，此时补一次预取。
+        this.prefetchNeighborAnswer(false);
+      });
   }
 
   private activateInteraction(content: LoadedContentDetail): void {
@@ -3669,7 +3830,7 @@ export function contentShareSummary(content: LoadedContentDetail): string {
       return excerpt;
     }
   }
-  return '来自知乎++的受信内容链接';
+  return '来自知乎Plus的受信内容链接';
 }
 
 /** 分享卡片缩略图：仅接受受信 zhimg 头像 URL，其余返回 undefined（卡片退回默认图标）。 */
@@ -3803,6 +3964,15 @@ export function contentIpInfo(content: LoadedContentDetail): string {
   return (content.value.ipInfo ?? '').trim();
 }
 
+/** 回答的评论总数（热评区块“共 N 条”用）；非回答或异常值返回 0。 */
+export function contentCommentCount(content: LoadedContentDetail): number {
+  if (content.kind !== ContentDetailKind.ANSWER) {
+    return 0;
+  }
+  const count = content.value.commentCount;
+  return count > 0 ? count : 0;
+}
+
 /** 认可徽章背景色：按知乎 token 组映射，未知回退主题浅色。 */
 function endorsementBackgroundColor(endorsement: AnswerEndorsementDisplay): ResourceColor {
   const group = endorsement.backgroundColorGroup ?? '';
@@ -3900,6 +4070,8 @@ const ANSWER_HORIZONTAL_TRIGGER_THRESHOLD: number = 46;
 const ANSWER_OVERSCROLL_TRIGGER_THRESHOLD: number = 80;
 /** 回答下滑切换：阻尼系数，对齐上游 DAMPING_FACTOR。 */
 const ANSWER_OVERSCROLL_DAMPING_FACTOR: number = 1.2;
+/** 回答切换提交过渡：整页滑出/滑回动画时长（ms）。 */
+const ANSWER_SWITCH_SLIDE_DURATION: number = 220;
 
 /** tanh 阻尼（对齐上游 dampedOverscrollOffset）：位移趋近上限时增益渐减。 */
 function dampedOverscrollOffset(rawDelta: number, maxOverscroll: number, dampingFactor: number): number {

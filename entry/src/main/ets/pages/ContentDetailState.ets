@@ -126,7 +126,11 @@ export class ContentDetailController {
     };
   }
 
-  async load(kind: ContentDetailKind, id: string): Promise<void> {
+  /**
+   * 加载内容详情。preferAnswerCache 仅对回答生效：为 true 时优先复用预取结果
+   * （回答切换导航），下拉刷新等场景保持缺省 false 以强制拉取最新数据。
+   */
+  async load(kind: ContentDetailKind, id: string, preferAnswerCache: boolean = false): Promise<void> {
     if (!this.active) {
       return;
     }
@@ -144,7 +148,7 @@ export class ContentDetailController {
     this.phase = ContentDetailPhase.LOADING;
     this.emit();
     try {
-      const loaded = await this.fetch(kind, id, generation);
+      const loaded = await this.fetch(kind, id, generation, preferAnswerCache);
       if (!this.isCurrent(generation)) {
         return;
       }
@@ -170,12 +174,17 @@ export class ContentDetailController {
     }
   }
 
-  private async fetch(kind: ContentDetailKind, id: string, generation: number): Promise<LoadedContentDetail> {
+  private async fetch(kind: ContentDetailKind, id: string, generation: number,
+    preferAnswerCache: boolean = false): Promise<LoadedContentDetail> {
     switch (kind) {
       case ContentDetailKind.QUESTION:
         return { kind: kind, loadGeneration: generation, value: await this.repository.getQuestion(id) };
       case ContentDetailKind.ANSWER:
-        return { kind: kind, loadGeneration: generation, value: await this.repository.getAnswer(id) };
+        return {
+          kind: kind,
+          loadGeneration: generation,
+          value: await this.repository.getAnswer(id, preferAnswerCache)
+        };
       case ContentDetailKind.ARTICLE:
         return { kind: kind, loadGeneration: generation, value: await this.repository.getArticle(id) };
     }

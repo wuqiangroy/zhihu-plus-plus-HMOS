@@ -233,7 +233,8 @@ struct Index {
       this.videoRepository = new DefaultVideoRepository(new ZhihuHttpClient(session));
       this.questionAnswerFeedFactory = (): QuestionAnswerFeedRepository =>
         new DefaultQuestionAnswerFeedRepository(new ZhihuHttpClient(session), blockingMatcher);
-      this.answerRepository = new DefaultContentRepository(new ZhihuHttpClient(session));
+      // 回答正文缓存 4 条：滑动切换回答时命中预取结果，避免整页重新加载。
+      this.answerRepository = new DefaultContentRepository(new ZhihuHttpClient(session), 4);
       this.articleRepository = new DefaultContentRepository(new ZhihuHttpClient(session));
       this.continuousRepositoriesFactory = (): ContinuousAnswerRepositories => new ContinuousAnswerRepositories(session);
       this.peopleRepository = new DefaultPeopleRepository(new ZhihuHttpClient(session));

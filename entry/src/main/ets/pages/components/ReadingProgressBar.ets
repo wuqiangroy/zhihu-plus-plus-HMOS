@@ -76,6 +76,11 @@ export struct ReadingProgressBar {
   @StorageProp('bottomRectHeight') private systemBarsBottomVp: number = 0;
   @StorageProp('resolvedThemeColor') private resolvedThemeColor: string = DEFAULT_THEME_COLOR;
   /**
+   * 回答页整页切换（横向/纵向过滑）进行中：正文连同进度条一起在平移，进度条跟着滑出
+   * 会与相邻回答页重叠，期间直接隐藏并关掉命中；切换结束后按原有淡入淡出恢复。
+   */
+  @StorageProp('answerOverscrollActive') private switchActive: boolean = false;
+  /**
    * 拖动开始/结束通知宿主：拖动期间正文改由 `scrollTo` 驱动，宿主需屏蔽贴边过滑
    * （回答页贴底时向上拖滚动条会被误判为"下一答"过滑）。
    */
@@ -128,10 +133,11 @@ export struct ReadingProgressBar {
     .width(READING_PROGRESS_BAR_HIT_WIDTH_VP)
     .height('100%')
     .padding({ top: this.topInsetVp, bottom: this.bottomInset() })
-    .opacity(this.alpha)
+    .opacity(this.switchActive ? 0 : this.alpha)
     // 命中开关与透明度分离：`alpha` 归零时节点仍在树上（不遮挡、不响应），
     // 避免"隐藏期间把手势吃掉"，也不会因节点反复进出渲染树而丢掉命中能力。
-    .hitTestBehavior(this.mounted && this.scrollable() ? HitTestMode.Default : HitTestMode.None)
+    .hitTestBehavior(this.mounted && this.scrollable() && !this.switchActive
+      ? HitTestMode.Default : HitTestMode.None)
     .gesture(
       PanGesture({ fingers: 1, direction: PanDirection.Vertical })
         .onActionStart((): void => {
