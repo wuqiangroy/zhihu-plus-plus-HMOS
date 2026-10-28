@@ -28,7 +28,7 @@ import {
   removeCommentTitle
 } from './CommentTitleBar';
 import { materialCanvas } from './components/MaterialCanvas';
-import { commentAvatarUrl, commentImageUrl, stripCommentHtml } from './CommentText';
+import { commentAvatarUrl, commentImageUrls, stripCommentHtml } from './CommentText';
 
 /** 评论输入胶囊与 PR #23 详情页底栏使用同一套 48vp 大胶囊规格。 */
 const COMMENT_INPUT_CAPSULE_HEIGHT: number = 48;
@@ -453,20 +453,19 @@ export struct CommentPage {
           copyOption: CopyOptions.LocalDevice,
           componentId: `comments_content_${comment.id}`
         })
-        if (commentImageUrl(comment.contentHtml).length > 0) {
-          Image(commentImageUrl(comment.contentHtml))
-            .id(`comments_image_${comment.id}`)
+        ForEach(commentImageUrls(comment.contentHtml), (url: string, index: number): void => {
+          Image(url)
+            .id(`comments_image_${comment.id}_${index}`)
             .width(200)
             .height(100)
             .constraintSize({ maxWidth: '100%' })
             .objectFit(ImageFit.Contain)
             .borderRadius(12)
             .margin({ top: 4 })
-            .accessibilityText('查看评论图片')
-            .onClick((): void => {
-              this.setPreviewUrl(commentImageUrl(comment.contentHtml));
-            })
-        }
+            .focusable(true)
+            .accessibilityText(`查看评论图片 ${index + 1}`)
+            .onClick((): void => this.setPreviewUrl(url), 12)
+        }, (url: string): string => url)
         this.commentFooter(comment, showDelete)
       }
       .alignItems(HorizontalAlign.Start)

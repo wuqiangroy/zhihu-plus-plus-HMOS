@@ -9,7 +9,7 @@ import { AnswerTitleGeometry } from './AnswerTitleGeometry';
 import { publishArticleTitle } from './ArticleTitleBar';
 import { FeedContentSummary } from './components/FeedContentSummary';
 import { HotCommentSection } from './components/HotCommentSection';
-import { HOT_COMMENT_PREVIEW_LIMIT, hotCommentPreview } from './HotCommentState';
+import { HotCommentController, HotCommentPhase, HotCommentViewState } from './HotCommentState';
 import {
   AppPageStatusKind,
   AppPageStatusPanel,
@@ -42,11 +42,7 @@ import {
   ChannelContentItem,
   CollectionRepository,
   CollectionSummary,
-  CommentContentKind,
-  CommentItem,
-  CommentPage,
   CommentRepository,
-  CommentSortOrder,
   ContentDetailKind,
   ContentRepository,
   ContentVoteState,
@@ -258,11 +254,11 @@ struct ContentDetailPage {
   @State private contentFavorited: boolean = false;
   private favoriteStateContentId: string = '';
   private favoriteStateEpoch: number = 0;
-  /** 回答尾部热门评论预览（按热度排序的根评论，最多 HOT_COMMENT_PREVIEW_LIMIT 条）。 */
-  @State private hotComments: Array<CommentItem> = [];
-  @State private hotCommentsLoading: boolean = false;
-  /** 热评对应的回答 ID：回包时校验，避免切换回答后旧请求覆盖新内容。 */
-  private hotCommentsAnswerId: string = '';
+  @State private hotCommentState: HotCommentViewState = {
+    answerId: '', phase: HotCommentPhase.IDLE, comments: []
+  };
+  private hotCommentController?: HotCommentController;
+  hotCommentRepositoryFactory: () => CommentRepository | undefined = () => undefined;
   /** 详情页双击正文动作（对齐上游 answerDoubleTapAction）：AppStorage 广播跨页同步
    * （详情页 Ask 面板与设置页改动互见），默认询问并记住。 */
   @StorageProp('answerDoubleTapAction') private answerDoubleTapAction: AnswerDoubleTapAction =
@@ -275,7 +271,7 @@ struct ContentDetailPage {
   @StorageProp('buttonSkipAnswer') private buttonSkipAnswer: boolean = true;
   @StorageProp('autoHideSkipAnswerButton') private autoHideSkipAnswerButton: boolean = true;
   /** 回答页底部热评卡片开关：关闭后不拉取也不渲染。 */
-  @StorageProp('showHotComments') private showHotComments: boolean = true;
+  @StorageProp('showHotComments') @Watch('onHotCommentsChanged') private showHotComments: boolean = true;
   /** 操作跟随智感握姿（设置页广播）：开启后跳转按钮与收藏/评论/更多胶囊吸附握持侧。 */
   @StorageProp('gripFollowActions') @Watch('onGripFollowActionsChanged') private gripFollowActions: boolean = false;
   /** 原生智感握姿能力（SystemCapability.MultimodalAwareness.Motion，握持手识别 API 20+）：
@@ -373,6 +369,8 @@ struct ContentDetailPage {
       if (this.sessionReloadPending || this.phase === ContentDetailPhase.LOADING) {
         this.sessionReloadPending = false;
         void this.controller.load(this.kind, this.activeContentId);
+      } else if (this.content !== undefined) {
+        this.refreshHotComments(this.content);
       }
       return;
     }
@@ -410,6 +408,7 @@ struct ContentDetailPage {
   }
 
   private onLoginChanged(): void {
+    this.resetHotComments();
     this.invalidateAnswerSwitch();
     this.sessionReloadPending = true;
     this.favoriteStateEpoch += 1;
@@ -432,6 +431,7 @@ struct ContentDetailPage {
   }
 
   aboutToDisappear(): void {
+    this.resetHotComments();
     this.invalidateAnswerSwitch();
     this.answerPrefetcher?.dispose();
     this.answerPrefetcher = undefined;
@@ -1001,45 +1001,29 @@ struct ContentDetailPage {
       });
   }
 
-  /**
-   * 拉取回答尾部的热评预览（热度排序的根评论首页，取前几条）。
-   * 只对回答详情生效；游客态或未装配评论仓库时静默清空，不影响正文。
-   * 同一回答不重复请求（切换回答由 answerId 变化触发，回包按 answerId 校验）。
-   */
-  private refreshHotComments(content: LoadedContentDetail): void {
+  private resetHotComments(): void {
+    this.hotCommentController?.reset();
+  }
+
+  private onHotCommentsChanged(): void {
+    if (this.content !== undefined) { this.refreshHotComments(this.content); }
+    else { this.resetHotComments(); }
+  }
+
+  /** 正式可见文档才发起请求；候选及离屏页既不请求，也不接纳迟到数据。 */
+  private refreshHotComments(content: LoadedContentDetail, force: boolean = false): void {
     if (content.kind !== ContentDetailKind.ANSWER || !this.showHotComments) {
-      this.hotComments = [];
-      this.hotCommentsLoading = false;
-      this.hotCommentsAnswerId = '';
+      this.resetHotComments();
       return;
     }
-    const answerId = content.value.id;
-    if (answerId === this.hotCommentsAnswerId) {
-      return;
+    if (!this.isDisplayedContent(content)) { return; }
+    if (this.hotCommentController === undefined) {
+      this.hotCommentController = new HotCommentController(this.hotCommentRepositoryFactory,
+        (state: HotCommentViewState): void => { this.hotCommentState = state; });
     }
-    this.hotCommentsAnswerId = answerId;
-    this.hotComments = [];
-    const repository = this.commentRepository;
-    if (repository === undefined) {
-      this.hotCommentsLoading = false;
-      return;
-    }
-    this.hotCommentsLoading = true;
-    repository.getRootCommentsPage(CommentContentKind.ANSWER, answerId, CommentSortOrder.SCORE)
-      .then((page: CommentPage): void => {
-        if (this.hotCommentsAnswerId !== answerId) {
-          return;
-        }
-        this.hotComments = hotCommentPreview(page.items, HOT_COMMENT_PREVIEW_LIMIT);
-        this.hotCommentsLoading = false;
-      })
-      .catch((_error: Error): void => {
-        if (this.hotCommentsAnswerId !== answerId) {
-          return;
-        }
-        this.hotComments = [];
-        this.hotCommentsLoading = false;
-      });
+    const session = this.session?.getState();
+    const accountKey = JSON.stringify([session?.status ?? 'guest', session?.profile?.id ?? '', this.loginTick]);
+    void this.hotCommentController.load(content.value.id, this.answerDocumentKey(content), accountKey, force);
   }
 
   @Builder
@@ -1687,14 +1671,20 @@ struct ContentDetailPage {
   @Builder
   private answerFooter(content: LoadedContentDetail) {
     if (content.kind === ContentDetailKind.ANSWER && this.showHotComments &&
-      this.isDisplayedContent(content) && this.hotCommentsAnswerId === content.value.id) {
+      this.isDisplayedContent(content) && this.hotCommentState.answerId === content.value.id) {
       HotCommentSection({
-        comments: this.hotComments,
+        comments: this.hotCommentState.comments,
         totalCount: contentCommentCount(content),
-        loading: this.hotCommentsLoading,
-        onOpenAll: (): void => this.openComments(),
+        loading: this.hotCommentState.phase === HotCommentPhase.LOADING,
+        failed: this.hotCommentState.phase === HotCommentPhase.ERROR,
+        onRetry: (): void => {
+          if (this.isDisplayedContent(content)) { this.refreshHotComments(content, true); }
+        },
+        onOpenAll: (): void => {
+          if (this.isDisplayedContent(content)) { this.openComments(); }
+        },
         onImagePreview: (url: string): void => {
-          AppStorage.setOrCreate('imagePreviewUrl', url);
+          if (this.isDisplayedContent(content)) { AppStorage.setOrCreate('imagePreviewUrl', url); }
         }
       })
     }
@@ -2652,8 +2642,10 @@ struct ContentDetailPage {
         this.publishActiveAnswerDocument();
         this.syncAnswerTitle();
         this.prefetchNeighborAnswer(false);
+        if (this.content !== undefined) { this.refreshHotComments(this.content); }
       }
     } else {
+      this.resetHotComments();
       this.invalidateAnswerSwitch();
     }
   }
@@ -3643,6 +3635,7 @@ struct ContentDetailPage {
       }
       this.answerQuestionId = state.content.value.questionId;
     }
+    if (state.phase !== ContentDetailPhase.READY) { this.resetHotComments(); }
     this.phase = state.phase;
     this.content = state.content;
     this.segmentInfos = this.extractSegmentInfos(state.content);
@@ -3813,6 +3806,7 @@ export struct QuestionDetailPage {
 
 @Component
 export struct AnswerDetailPage {
+  hotCommentRepositoryFactory: () => CommentRepository | undefined = () => undefined;
   answerPrefetchRepositoryFactory: () => ContentRepository | undefined = () => undefined;
   questionAnswerFeedFactory: () => QuestionAnswerFeedRepository | undefined = () => undefined;
   contentId: string = '';
@@ -3843,6 +3837,7 @@ export struct AnswerDetailPage {
       contentId: this.contentId,
       repository: this.repository,
       answerPrefetchRepositoryFactory: this.answerPrefetchRepositoryFactory,
+      hotCommentRepositoryFactory: this.hotCommentRepositoryFactory,
       linkCardMetaRepository: this.linkCardMetaRepository,
       openedContentStore: this.openedContentStore,
       historyUploader: this.historyUploader,

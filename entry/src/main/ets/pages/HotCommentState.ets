@@ -1,4 +1,4 @@
-import { CommentItem } from 'data';
+import { CommentContentKind, CommentItem, CommentPage, CommentRepository, CommentSortOrder } from 'data';
 import { commentImageUrl, stripCommentHtml } from './CommentText';
 
 /** 回答尾部「热门评论」展示条数上限。 */
@@ -30,4 +30,74 @@ export function hotCommentPreview(items: Array<CommentItem>, limit: number): Arr
     picked.push(item);
   }
   return picked;
+}
+
+export enum HotCommentPhase {
+  IDLE = 'idle',
+  LOADING = 'loading',
+  EMPTY = 'empty',
+  ERROR = 'error',
+  READY = 'ready'
+}
+
+export interface HotCommentViewState {
+  answerId: string;
+  phase: HotCommentPhase;
+  comments: Array<CommentItem>;
+}
+
+/** 每次请求独占仓库；取消只影响自己的 IO，不取消完整评论页或另一回答的请求。 */
+export class HotCommentController {
+  private generation: number = 0;
+  private identity: string = '';
+  private pending?: CommentRepository;
+  private state: HotCommentViewState = { answerId: '', phase: HotCommentPhase.IDLE, comments: [] };
+  private readonly repositoryFactory: () => CommentRepository | undefined;
+  private readonly observe: (state: HotCommentViewState) => void;
+
+  constructor(factory: () => CommentRepository | undefined, observe: (state: HotCommentViewState) => void) {
+    this.repositoryFactory = factory;
+    this.observe = observe;
+  }
+
+  snapshot(): HotCommentViewState { return this.state; }
+
+  reset(): void {
+    this.generation += 1;
+    this.identity = '';
+    const pending = this.pending;
+    this.pending = undefined;
+    pending?.cancel();
+    this.publish('', HotCommentPhase.IDLE, []);
+  }
+
+  async load(answerId: string, documentKey: string, accountKey: string, force: boolean = false): Promise<void> {
+    const identity = JSON.stringify([answerId, documentKey, accountKey]);
+    if (!force && this.identity === identity) { return; }
+    this.reset();
+    this.identity = identity;
+    const generation = this.generation;
+    this.publish(answerId, HotCommentPhase.LOADING, []);
+    try {
+      const repository = this.repositoryFactory();
+      if (repository === undefined) { throw new Error('热评数据源未配置'); }
+      this.pending = repository;
+      const page: CommentPage = await repository.getRootCommentsPage(
+        CommentContentKind.ANSWER, answerId, CommentSortOrder.SCORE);
+      if (generation !== this.generation || identity !== this.identity) { return; }
+      const comments = hotCommentPreview(page.items, HOT_COMMENT_PREVIEW_LIMIT);
+      this.publish(answerId, comments.length > 0 ? HotCommentPhase.READY : HotCommentPhase.EMPTY, comments);
+    } catch (_error) {
+      if (generation === this.generation && identity === this.identity) {
+        this.publish(answerId, HotCommentPhase.ERROR, []);
+      }
+    } finally {
+      if (generation === this.generation) { this.pending = undefined; }
+    }
+  }
+
+  private publish(answerId: string, phase: HotCommentPhase, comments: Array<CommentItem>): void {
+    this.state = { answerId: answerId, phase: phase, comments: comments };
+    this.observe(this.state);
+  }
 }

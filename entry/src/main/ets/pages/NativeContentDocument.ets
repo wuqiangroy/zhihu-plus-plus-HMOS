@@ -1165,8 +1165,9 @@ export struct NativeContentDocument {
       this.focusRequested = true;
       this.focusRequestAttempts = 0;
     })
-    .focusable(this.volumeKeyPageTurn && (this.answerDocumentKey.length === 0 || this.positionIsActive()))
-    .defaultFocus(this.volumeKeyPageTurn && (this.answerDocumentKey.length === 0 || this.positionIsActive()))
+    // 关闭音量键翻页只停止抢焦点，不能阻断正文图片等子节点的键盘导航。
+    .focusable(this.documentCanFocus())
+    .defaultFocus(this.volumeKeyPageTurn && this.documentCanFocus())
     .onKeyPreIme((event: KeyEvent): boolean => this.handleReaderKey(event))
   }
 
@@ -1181,6 +1182,10 @@ export struct NativeContentDocument {
       return `${item.id}:${this.renderRevision}`;
     }
     return `${item.id}:${this.renderRevision}:${this.linkCardMetaVersions.get(item.sourceUrl) ?? 0}`;
+  }
+
+  private documentCanFocus(): boolean {
+    return this.answerDocumentKey.length === 0 || this.positionIsActive();
   }
 
   private handleReaderKey(event: KeyEvent): boolean {

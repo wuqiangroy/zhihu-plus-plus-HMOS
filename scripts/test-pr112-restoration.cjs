@@ -31,6 +31,7 @@ function load(file) {
     };
     if (spec.endsWith('/DomainModels')) return {};
     if (spec === 'data') return {
+      ...load('data/src/main/ets/domain/CommentModels.ets'),
       ...load('data/src/main/ets/repository/ContentRepository.ets'),
       ...load('data/src/main/ets/repository/DefaultContentRepository.ets'),
       ...load('data/src/main/ets/network/HttpFailure.ets'),
@@ -76,7 +77,7 @@ function pageFixture(repository = {getAnswer: async id => answer(id), cancel() {
   const storage = {setOrCreate: (key, value) => broadcasts.push({key, value})};
   const names = ['applyAnswerMove', 'moveAnswer', 'commitAnswerSwitch', 'invalidateAnswerSwitch',
     'waitForAnswerViewport', 'finishAnswerViewportWait', 'showAnswerSwitchFailure', 'applyVoteState', 'onLoginChanged', 'isDisplayedContent',
-    'answerDocumentKey', 'setAnswerPanes', 'candidatePane', 'mountAnswerCandidate', 'unmountAnswerCandidate',
+    'resetHotComments', 'refreshHotComments', 'onHotCommentsChanged', 'answerDocumentKey', 'setAnswerPanes', 'candidatePane', 'mountAnswerCandidate', 'unmountAnswerCandidate',
     'onAnswerDocumentPrepared', 'onAnswerViewportPrepared', 'trackAnswerPaneViewport', 'trackAnswerPaneEdges',
     'beginAnswerSwitchWait', 'dismissAnswerSwitchWait', 'prepareSwitchAnswer', 'cancelAnswerDrag',
     'onAnswerTitleLayoutChanged', 'contentTopInsetVp', 'answerIdentityLayout', 'measureAnswerIdentity', 'updateAnswerTitleScrolled', 'syncAnswerTitle', 'answerPageVisible', 'publishActiveAnswerDocument', 'onReaderOwnerChanged', 'answerPaneTranslate', 'answerPaneVisible', 'answerSwitchPageTranslate', 'answerSwitchExtentVp', 'applyOverscrollOffset'];
@@ -730,6 +731,122 @@ contract('answer-identity-change-does-not-animate-through-old-author', false, ()
   state = {...state, scrolled: true, authorVisible: true}; bar.onStatesChanged();
   assert.equal(bar.folded, true); assert.equal(bar.authorVisible, true); assert.equal(animations, 1);
 });
+
+contract('reader-focus-scope-is-independent-of-volume-setting-and-excludes-candidates', false, () => {
+  const Harness = methodHarness(pages + 'NativeContentDocument.ets', 'documentCanFocus');
+  const document = new Harness();
+  Object.assign(document, {answerDocumentKey: 'a:1', positionIsActive: () => true, volumeKeyPageTurn: false});
+  assert.equal(document.documentCanFocus(), true);
+  document.positionIsActive = () => false;
+  assert.equal(document.documentCanFocus(), false);
+  document.answerDocumentKey = '';
+  assert.equal(document.documentCanFocus(), true);
+});
+const {HotCommentController, HotCommentPhase} = load(pages + 'HotCommentState.ets');
+const {commentImageUrls, stripCommentHtml} = load(pages + 'CommentText.ets');
+function hotFixture() {
+  const requests = [];
+  const controller = new HotCommentController(() => {
+    const deferred = {};
+    const result = new Promise((resolve, reject) => Object.assign(deferred, {resolve, reject}));
+    const request = {id: '', cancelled: 0, getRootCommentsPage: (kind, id, sort) => {
+      assert.equal(kind, 'answer'); assert.equal(sort, 'score'); request.id = id; return result;
+    }, cancel() {request.cancelled++;}, ...deferred};
+    requests.push(request); return request;
+  }, () => {});
+  return {controller, requests};
+}
+const commentPage = items => ({items, cursor: {isEnd: true, isStart: true, page: 1, total: items.length}});
+const hotComment = (id, contentHtml = '<p>text[赞同]</p>') => ({id, contentHtml, likeCount: 3, isDelete: false, collapsed: false});
+contract('hot-comments-failure-retry-empty-and-success-are-distinct', false, async () => {
+  const f = hotFixture();
+  const failed = f.controller.load('1', '1:1', 'user');
+  assert.equal(f.controller.snapshot().phase, HotCommentPhase.LOADING);
+  f.requests[0].reject(Error('offline')); await failed;
+  assert.equal(f.controller.snapshot().phase, HotCommentPhase.ERROR);
+  const retry = f.controller.load('1', '1:1', 'user', true);
+  f.requests[1].resolve(commentPage([])); await retry;
+  assert.equal(f.controller.snapshot().phase, HotCommentPhase.EMPTY);
+  const refresh = f.controller.load('1', '1:2', 'user');
+  f.requests[2].resolve(commentPage([
+    {...hotComment('zero'), likeCount: 0}, {...hotComment('deleted'), isDelete: true},
+    hotComment('image', '<img src="https://pic1.zhimg.com/a.gif">'), hotComment('2'), hotComment('3'), hotComment('4')
+  ])); await refresh;
+  assert.equal(f.controller.snapshot().phase, HotCommentPhase.READY);
+  assert.deepEqual(Array.from(f.controller.snapshot().comments, item => item.id), ['image', '2', '3']);
+});
+contract('hot-comments-old-A-and-old-account-cannot-replace-current-A', false, async () => {
+  const f = hotFixture();
+  const a1 = f.controller.load('1', '1:1', 'a');
+  const b = f.controller.load('2', '2:1', 'a');
+  const a2 = f.controller.load('1', '1:2', 'a');
+  const account = f.controller.load('1', '1:2', 'b');
+  f.requests[3].resolve(commentPage([hotComment('current')])); await account;
+  f.requests[0].resolve(commentPage([hotComment('oldA')])); f.requests[1].reject(Error('oldB'));
+  f.requests[2].resolve(commentPage([hotComment('oldAccount')])); await Promise.all([a1, b, a2]);
+  assert.equal(f.controller.snapshot().comments[0].id, 'current');
+  assert.deepEqual(f.requests.map(item => item.cancelled), [1, 1, 1, 0]);
+});
+contract('hot-comments-factory-failure-does-not-reject-page-or-look-empty', false, async () => {
+  const controller = new HotCommentController(() => {throw Error('factory unavailable');}, () => {});
+  await controller.load('1', '1:1', 'a');
+  assert.equal(controller.snapshot().phase, HotCommentPhase.ERROR);
+});
+function hotPageFixture() {
+  const f = pageFixture();
+  const names = ['resetHotComments', 'refreshHotComments', 'onHotCommentsChanged'];
+  const globals = {ContentDetailKind, HotCommentController};
+  for (const name of names) f.page[name] = methodHarness(pages + 'ContentDetailPages.ets', name, {...globals}).prototype[name];
+  const requests = [];
+  Object.assign(f.page, {showHotComments: true, loginTick: 1,
+    hotCommentRepositoryFactory() {
+      const deferred = {}; const promise = new Promise((resolve, reject) => Object.assign(deferred, {resolve, reject}));
+      const request = {cancelled: 0, cancel() {this.cancelled++;}, getRootCommentsPage: () => promise, ...deferred};
+      requests.push(request); return request;
+    }});
+  return {...f, requests};
+}
+contract('hot-comment-page-toggle-and-hidden-route-discard-inflight-and-reopen-fresh', false, async () => {
+  const f = hotPageFixture();
+  try {
+    await f.controller.load(ContentDetailKind.ANSWER, '1'); f.page.refreshHotComments(f.page.content);
+    f.page.showHotComments = false; f.page.onHotCommentsChanged();
+    f.requests[0].resolve(commentPage([hotComment('old')])); await tick();
+    assert.equal(f.page.hotCommentState.phase, HotCommentPhase.IDLE);
+    f.page.showHotComments = true; f.page.onHotCommentsChanged(); assert.equal(f.requests.length, 2);
+    f.page.readerVisibleOwner = 'answer:another'; f.page.onReaderOwnerChanged();
+    assert.equal(f.requests[1].cancelled, 1);
+    f.requests[1].resolve(commentPage([hotComment('hidden')])); await tick();
+    assert.equal(f.page.hotCommentState.phase, HotCommentPhase.IDLE);
+    f.page.readerVisibleOwner = 'answer:1'; f.page.onReaderOwnerChanged(); assert.equal(f.requests.length, 3);
+    f.requests[2].resolve(commentPage([])); await tick(); assert.equal(f.page.hotCommentState.phase, HotCommentPhase.EMPTY);
+  } finally {f.page.resetHotComments(); f.dispose();}
+});
+contract('hot-comments-follow-only-committed-documents-and-refresh-on-same-id-generation', false, async () => {
+  const f = hotPageFixture();
+  try {
+    await f.controller.load(ContentDetailKind.ANSWER, '1'); f.page.refreshHotComments(f.page.content);
+    f.requests[0].resolve(commentPage([hotComment('first')])); await tick();
+    f.page.refreshHotComments(f.page.content); assert.equal(f.requests.length, 1);
+    const candidate = {...f.page.content, value: answer('2'), loadGeneration: 100};
+    // Candidate events cannot issue IO or discard the committed preview.
+    f.page.refreshHotComments(candidate); assert.equal(f.requests.length, 1);
+    f.page.refreshHotComments(f.page.content); assert.equal(f.requests.length, 1);
+    assert.equal(f.page.hotCommentState.comments[0].id, 'first');
+    await f.controller.load(ContentDetailKind.ANSWER, '1'); f.page.refreshHotComments(f.page.content);
+    assert.equal(f.requests.length, 2); assert.equal(f.page.hotCommentState.phase, HotCommentPhase.LOADING);
+    f.page.onLoginChanged(); f.requests[1].resolve(commentPage([hotComment('oldAccount')])); await tick();
+    assert.equal(f.page.hotCommentState.phase, HotCommentPhase.IDLE);
+  } finally {f.page.resetHotComments(); f.dispose();}
+});
+contract('comment-text-keeps-unsupported-fallback-and-all-supported-images-in-order', false, () => {
+  const html = '<img src="https://pic1.zhimg.com/a.png">文字[微笑]' +
+    '<a class="comment_gif" href="https://pica.zhimg.com/b.gif">动图</a>' +
+    '<a class="comment_img" href="https://example.com/c">查看原图</a><img src="bad" alt="图片说明">';
+  assert.deepEqual(Array.from(commentImageUrls(html)), ['https://pic1.zhimg.com/a.png', 'https://pica.zhimg.com/b.gif']);
+  assert.equal(stripCommentHtml(html), '文字[微笑]查看原图图片说明');
+});
+
 (async () => {
   let failed = 0;
   let selected = 0;

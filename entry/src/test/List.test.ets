@@ -1,3 +1,4 @@
+import hotCommentLifecycleTest from './HotCommentLifecycle.test';
 import answerTitleGeometryTest from './AnswerTitleGeometry.test';
 import answerPanePreparationTest from './AnswerPanePreparation.test';
 import answerSwitchPrefetchTest from './AnswerSwitchPrefetch.test';
@@ -216,6 +217,7 @@ export default function testsuite(): void {
   continuousAnswerLifecycleTest();
   continuousReferenceNavigatorTest();
   linkCardMetaLoaderTest();
+  hotCommentLifecycleTest();
   hotCommentStateTest();
   commentTextTest();
 }

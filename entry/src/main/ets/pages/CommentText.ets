@@ -20,42 +20,46 @@ function isZhihuImageUrl(url: string): boolean {
   return /^https:\/\/pic[a-z0-9]*\.zhimg\.com\//i.test(url);
 }
 
-/** 评论正文里的首个表情/图片地址（知乎用 `comment_img`/`comment_gif`/`comment_sticker` 锚点，
- * 表情包也常以裸 `<img>` 下发）。 */
-export function commentImageUrl(html: string): string {
-  const anchors = html.match(/<a\b[^>]*>/gi) ?? [];
-  for (const anchor of anchors) {
-    if (!/\bclass\s*=\s*["'][^"']*\bcomment_(img|gif|sticker)\b/i.test(anchor)) {
-      continue;
-    }
-    const href = anchor.match(/\bhref\s*=\s*["']([^"']+)["']/i);
-    if (href !== null) {
-      const url = commentAvatarUrl(href[1].replace(/&amp;/gi, '&'));
-      if (isZhihuImageUrl(url)) {
-        return url;
-      }
-    }
-  }
-  const images = html.match(/<img\b[^>]*>/gi) ?? [];
-  for (const image of images) {
-    const src = image.match(/\bsrc\s*=\s*["']([^"']+)["']/i);
-    if (src === null) {
-      continue;
-    }
-    const url = commentAvatarUrl(src[1].replace(/&amp;/gi, '&'));
-    if (isZhihuImageUrl(url)) {
-      return url;
-    }
-  }
-  return '';
+/** 仅接纳知乎图床；属性名前要求空白，避免把 data-src 当成 src。 */
+function imageAttribute(tag: string, name: string): string {
+  const match = tag.match(new RegExp('\\s' + name + '\\s*=\\s*["\']([^"\']+)["\']', 'i'));
+  return match === null ? '' : commentAvatarUrl(match[1].replace(/&amp;/gi, '&'));
 }
 
-/** 评论正文转纯文本：保留换行语义，去掉表情/图片锚点、标签与常见实体。
- * 图片统一在正文下方单独渲染，锚点内的「查看图片」字面不再保留。 */
+function supportedImageUrl(tag: string): string {
+  const url = imageAttribute(tag, /^<a\b/i.test(tag) ? 'href' : 'src');
+  return isZhihuImageUrl(url) ? url : '';
+}
+
+const COMMENT_IMAGE_PARTS: RegExp = /<a\b[^>]*\sclass\s*=\s*["'][^"']*\bcomment_(img|gif|sticker)\b[^"']*["'][^>]*>[\s\S]*?<\/a>|<img\b[^>]*>/gi;
+
+/** 按正文顺序提取全部受支持图片（包括 GIF）；调用方逐张展示，不能只显示首图却删掉其余文字。 */
+export function commentImageUrls(html: string): Array<string> {
+  const urls: Array<string> = [];
+  const parts = html.match(COMMENT_IMAGE_PARTS) ?? [];
+  for (const part of parts) {
+    const url = supportedImageUrl(part);
+    if (url.length > 0 && !urls.includes(url)) { urls.push(url); }
+  }
+  return urls;
+}
+
+export function commentImageUrl(html: string): string {
+  return commentImageUrls(html)[0] ?? '';
+}
+
+/** 只有实际进入图片展示列表的锚点才移除；不支持的来源保留锚点文字或 alt/可读占位。 */
 export function stripCommentHtml(html: string): string {
   const text = html
-    .replace(/<a\b[^>]*\bclass\s*=\s*["'][^"']*\bcomment_(img|gif|sticker)\b[^"']*["'][^>]*>[\s\S]*?<\/a>/gi, '')
-    .replace(/<img\b[^>]*>/gi, '')
+    .replace(COMMENT_IMAGE_PARTS, (part: string): string => {
+      if (supportedImageUrl(part).length > 0) { return ''; }
+      if (/^<a\b/i.test(part)) {
+        const label = part.replace(/<[^>]+>/g, '').trim();
+        return label.length > 0 ? label : '[图片暂不支持]';
+      }
+      const alt = part.match(/\salt\s*=\s*["']([^"']*)["']/i);
+      return alt !== null && alt[1].trim().length > 0 ? alt[1] : '[图片暂不支持]';
+    })
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/(p|div|h[1-6]|li|blockquote)>/gi, '\n')
     .replace(/<[^>]+>/g, '')
@@ -64,7 +68,7 @@ export function stripCommentHtml(html: string): string {
     .replace(/&lt;/gi, '<')
     .replace(/&gt;/gi, '>')
     .replace(/&quot;/gi, '"')
-    .replace(/&#39;/g, '\'')
+    .replace(/&#39;/g, "'")
     .replace(/\n{3,}/g, '\n\n');
   return text.trim();
 }
