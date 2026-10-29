@@ -1,12 +1,15 @@
 import {
-  AppUpdateDownloadSource, DEFAULT_THEME_COLOR, onThemeColor, sha256HexOfFile, updateDownloadSources
+  AppUpdateDownloadSource, DEFAULT_THEME_COLOR, FeedCardStyle, onThemeColor, sha256HexOfFile, updateDownloadSources
 } from 'data';
+import { floatingTitleBarOffset } from './AppPageChrome';
+
 import { pasteboard, request } from '@kit.BasicServicesKit';
 import { fileIo, picker } from '@kit.CoreFileKit';
 import notificationManager from '@ohos.notificationManager';
 import notification from '@ohos.notification';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { getAbilityContext } from '../entryability/AbilityContextHolder';
+import { settingsGroupBackground, settingsGroupRadius } from './AccountSettingsLayout';
 
 interface PopupStateChange {
   isVisible: boolean;
@@ -44,7 +47,10 @@ function downloadFailureHint(reason: string): string {
 
 @Component
 export struct SystemUpdateSettingsPage {
+  /** 嵌入设置双栏右栏时为 true：顶部让位交给宿主标题栏。 */
+  @Prop embedded: boolean = false;
   @StorageProp('resolvedThemeColor') private resolvedThemeColor: string = DEFAULT_THEME_COLOR;
+  @StorageProp('feedCardStyle') private feedCardStyle: string = FeedCardStyle.DIVIDER;
   @State private selectedSource: AppUpdateDownloadSource | undefined = undefined;
   @State private downloadBusy: boolean = false;
   @State private downloadStatus: string = '';
@@ -293,8 +299,8 @@ export struct SystemUpdateSettingsPage {
               .fontSize($r('app.float.secondary_font_size'))
               .fontColor($r('app.color.secondary_text')).width('100%')
           }
-        }.width('100%').padding(18).borderRadius($r('app.float.card_radius'))
-          .backgroundColor($r('app.color.surface_background'))
+        }.width('100%').padding(18).borderRadius(settingsGroupRadius(this.feedCardStyle))
+          .backgroundColor(settingsGroupBackground(this.feedCardStyle))
 
         if (this.availableVersion.length > 0) {
           Text('更新日志').fontSize(14).fontWeight(FontWeight.Medium)
@@ -333,8 +339,8 @@ export struct SystemUpdateSettingsPage {
                   .onClick((): void => { this.selectedSource = source; })
               }, (source: AppUpdateDownloadSource): string => source.url)
             }.width('100%')
-          }.width('100%').padding(16).borderRadius($r('app.float.card_radius'))
-            .backgroundColor($r('app.color.surface_background'))
+          }.width('100%').padding(16).borderRadius(settingsGroupRadius(this.feedCardStyle))
+            .backgroundColor(settingsGroupBackground(this.feedCardStyle))
         } else if (this.latestVersion.length > 0) {
           Text('此版本暂无可用的未签名 HAP 附件，请在 GitHub 发布页查看。')
             .fontSize($r('app.float.secondary_font_size'))
@@ -357,8 +363,8 @@ export struct SystemUpdateSettingsPage {
               .fontColor([$r('app.color.secondary_text')])
           }.width('100%')
         }.id('system_open_whats_new').width('100%').padding(16)
-          .borderRadius($r('app.float.card_radius'))
-          .backgroundColor($r('app.color.surface_background'))
+          .borderRadius(settingsGroupRadius(this.feedCardStyle))
+          .backgroundColor(settingsGroupBackground(this.feedCardStyle))
           .onClick((): void => this.onOpenWhatsNew())
 
         Text('支持与诊断').fontSize(14).fontWeight(FontWeight.Medium)
@@ -371,14 +377,16 @@ export struct SystemUpdateSettingsPage {
               .fontColor([$r('app.color.secondary_text')])
           }.width('100%')
         }.id('system_open_project').width('100%').padding(16)
-          .borderRadius($r('app.float.card_radius'))
-          .backgroundColor($r('app.color.surface_background'))
+          .borderRadius(settingsGroupRadius(this.feedCardStyle))
+          .backgroundColor(settingsGroupBackground(this.feedCardStyle))
           .onClick((): void => this.onOpenProject())
       }
       .width('100%')
       .padding({ left: $r('app.float.page_padding'), right: $r('app.float.page_padding'),
-        top: 81, bottom: 40 })
+        top: this.embedded ? 12 : 81, bottom: 40 })
     }
+    .align(Alignment.TopStart)
+    .contentStartOffset(this.embedded ? floatingTitleBarOffset() : 0)
     .id('system_update_scroll').width('100%').height('100%').scrollBar(BarState.Off)
     .backgroundColor($r('app.color.page_background'))
     .bindPopup(this.selectedSource !== undefined, {
